@@ -554,3 +554,106 @@ func TestShellOutcomePreservesFatalAndExplicitCancelPriority(t *testing.T) {
 		t.Fatal("direct-mode error behavior changed")
 	}
 }
+
+func TestShellDemoStartupFailureSurvivesBackWithoutRealAttempt(t *testing.T) {
+	for _, failure := range []string{"prepare", "engine"} {
+		t.Run(failure, func(t *testing.T) {
+			demoFailure := errors.New("demo startup failed")
+			success := fixtureExecutor(func(context.Context, process.Command, io.Writer) error { return nil })
+			m := shellFixture(t, &Shell{
+				LoadDemo: func(context.Context) (Config, error) {
+					cfg := planConfig("demo", success)
+					cfg.PrepareRun = func(context.Context) (update.Engine, error) {
+						if failure == "prepare" {
+							return update.Engine{}, demoFailure
+						}
+						return update.Engine{Jobs: -1}, nil
+					}
+					return cfg, nil
+				},
+				LoadUpgrades:  func(context.Context) (Config, error) { return planConfig("real", success), nil },
+				LoadInventory: func(context.Context) (inventory.Report, error) { return testReport(), nil },
+			})
+			press(m, tea.KeyDown)
+			press(m, tea.KeyDown)
+			deliver(t, m, press(m, tea.KeyEnter))
+			press(m, tea.KeyEnter)
+			startupErr := m.err
+			if startupErr == nil || !m.done || m.run != nil {
+				t.Fatal("demo startup did not fail")
+			}
+			if _, err := m.outcome(nil); !errors.Is(err, startupErr) {
+				t.Fatalf("current demo failure was lost: %v", err)
+			}
+			press(m, tea.KeyEscape)
+			press(m, tea.KeyUp)
+			deliver(t, m, press(m, tea.KeyEnter))
+			press(m, tea.KeyEnter)
+			press(m, tea.KeyEscape)
+			press(m, tea.KeyEscape)
+			if results, err := m.outcome(nil); !errors.Is(err, startupErr) || len(results) != 0 {
+				t.Fatalf("demo failure lost after Back/browsing: results=%v err=%v", results, err)
+			}
+			// A newly approved real attempt takes priority immediately, rather than
+			// resurfacing the older demo error while its result is pending.
+			press(m, tea.KeyUp)
+			deliver(t, m, press(m, tea.KeyEnter))
+			press(m, tea.KeyEnter)
+			if results, err := m.outcome(nil); err != nil || len(results) != 0 {
+				t.Fatalf("real approval retained earlier demo outcome: %v %v", results, err)
+			}
+			m.run.Wait()
+			m.Update(pollMsg(time.Now()))
+			press(m, tea.KeyEscape)
+			press(m, tea.KeyDown)
+			press(m, tea.KeyDown)
+			deliver(t, m, press(m, tea.KeyEnter))
+			press(m, tea.KeyEnter)
+			press(m, tea.KeyEscape)
+			results, err := m.outcome(nil)
+			if err != nil || len(results) != 1 || results[0].ID != "real" || results[0].Status != update.Succeeded {
+				t.Fatalf("later demo error replaced real success: %v %v", results, err)
+			}
+			fatal := errors.New("program failed")
+			if _, err := m.outcome(fatal); !errors.Is(err, fatal) {
+				t.Fatal("saved outcomes hid a fatal program error")
+			}
+		})
+	}
+}
+
+func TestShellLaterDemoCompletionReplacesDemoStartupFailure(t *testing.T) {
+	calls := 0
+	success := fixtureExecutor(func(context.Context, process.Command, io.Writer) error { return nil })
+	m := shellFixture(t, &Shell{LoadDemo: func(context.Context) (Config, error) {
+		cfg := planConfig("demo", success)
+		cfg.PrepareRun = func(context.Context) (update.Engine, error) {
+			calls++
+			if calls == 1 {
+				return update.Engine{}, errors.New("first demo failed")
+			}
+			return cfg.Engine, nil
+		}
+		return cfg, nil
+	}})
+	press(m, tea.KeyDown)
+	press(m, tea.KeyDown)
+	deliver(t, m, press(m, tea.KeyEnter))
+	press(m, tea.KeyEnter)
+	press(m, tea.KeyEscape)
+	if _, err := m.outcome(nil); err == nil {
+		t.Fatal("first demo failure was not retained")
+	}
+	deliver(t, m, press(m, tea.KeyEnter))
+	if _, err := m.outcome(nil); err == nil {
+		t.Fatal("review cleared an earlier demo failure without approval")
+	}
+	press(m, tea.KeyEnter)
+	m.run.Wait()
+	m.Update(pollMsg(time.Now()))
+	press(m, tea.KeyEscape)
+	results, err := m.outcome(nil)
+	if err != nil || len(results) != 1 || results[0].ID != "demo" || results[0].Status != update.Succeeded {
+		t.Fatalf("successful demo did not replace prior demo error: %v %v", results, err)
+	}
+}

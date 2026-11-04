@@ -44,19 +44,27 @@ func Show(ctx context.Context, input io.Reader, output io.Writer, cfg Config) ([
 	if m.run != nil {
 		m.results = m.run.Wait()
 		m.rememberRun()
+		m.rememberDemoRun()
 	}
 	return m.outcome(err)
 }
 
 // Shell sessions report the latest approved real attempt, even after leaving
-// its screen. Browsing and demo errors cannot erase that outcome. Direct modes
-// continue to report their current run's result/error.
+// its screen. If none exists, retain the latest approved demo outcome instead.
+// Browsing cannot erase either outcome. Direct modes report their current run.
 func (m *model) outcome(programErr error) ([]update.Result, error) {
 	results := m.results
 	if m.shell != nil {
-		results = m.lastRealResults
-		if programErr == nil {
-			programErr = m.lastRealErr
+		if m.realAttempted || m.lastRealErr != nil || len(m.lastRealResults) > 0 {
+			results = m.lastRealResults
+			if programErr == nil {
+				programErr = m.lastRealErr
+			}
+		} else {
+			results = m.lastDemoResults
+			if programErr == nil {
+				programErr = m.lastDemoErr
+			}
 		}
 	} else if programErr == nil {
 		programErr = m.err
@@ -91,6 +99,10 @@ type model struct {
 	quitAfterRun, backAfterRun bool
 	lastRealResults            []update.Result
 	lastRealErr                error
+	realAttempted              bool
+	lastDemoResults            []update.Result
+	lastDemoErr                error
+	demoResultsSaved           bool
 	resultsSaved               bool
 	exitErr                    error
 }
@@ -150,8 +162,14 @@ func (m *model) start() {
 		return
 	}
 	if m.shell != nil && !m.cfg.Demo {
+		m.realAttempted = true
 		m.lastRealResults = nil
 		m.lastRealErr = nil
+	}
+	if m.shell != nil && m.cfg.Demo {
+		m.lastDemoResults = nil
+		m.lastDemoErr = nil
+		m.demoResultsSaved = false
 	}
 	m.runCtx, m.cancelRun = context.WithCancel(m.ctx)
 	if m.cfg.PrepareRun != nil {
@@ -160,6 +178,7 @@ func (m *model) start() {
 			m.done = true
 			m.cancelRun()
 			m.rememberStartupError()
+			m.rememberDemoStartupError()
 			return
 		}
 	}
@@ -168,6 +187,21 @@ func (m *model) start() {
 		m.done = true
 		m.cancelRun()
 		m.rememberStartupError()
+		m.rememberDemoStartupError()
+	}
+}
+
+func (m *model) rememberDemoStartupError() {
+	if m.shell != nil && m.cfg.Demo {
+		m.lastDemoErr = m.err
+	}
+}
+
+func (m *model) rememberDemoRun() {
+	if m.shell != nil && m.cfg.Demo && m.run != nil && !m.demoResultsSaved {
+		m.lastDemoResults = append([]update.Result(nil), m.results...)
+		m.lastDemoErr = nil
+		m.demoResultsSaved = true
 	}
 }
 
@@ -241,6 +275,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.done = true
 				m.results = m.run.Wait()
 				m.rememberRun()
+				m.rememberDemoRun()
 				if m.cancelRun != nil {
 					m.cancelRun()
 				}

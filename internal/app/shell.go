@@ -39,15 +39,15 @@ func runShell(ctx context.Context, stdout, stderr io.Writer, options shellOption
 		LoadInventory: updaters.Inventory,
 	}
 	results, err := ui.Show(ctx, os.Stdin, stdout, ui.Config{Shell: shell})
+	if ctx.Err() != nil {
+		return 130
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 130
 		}
 		fmt.Fprintf(stderr, "up: %v\n", err)
 		return 1
-	}
-	if ctx.Err() != nil {
-		return 130
 	}
 	code := 0
 	for _, result := range results {

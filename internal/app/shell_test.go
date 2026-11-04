@@ -186,6 +186,12 @@ func TestInventoryShortcutUsesSameTUI(t *testing.T) {
 }
 
 func TestShellStartupFailureSurvivesInventoryBrowsing(t *testing.T) {
+	t.Run("quit", func(t *testing.T) { testShellStartupFailure(t, false) })
+	t.Run("parent cancellation", func(t *testing.T) { testShellStartupFailure(t, true) })
+}
+
+func testShellStartupFailure(t *testing.T, cancelParent bool) {
+	t.Helper()
 	f := startShell(t, "shell", "")
 	f.wait("Choose a feature")
 	// Block both native cache layouts without relying on Unix permission bits.
@@ -203,7 +209,14 @@ func TestShellStartupFailureSurvivesInventoryBrowsing(t *testing.T) {
 	f.waitSince("Choose a feature", beforeBack)
 	f.send("\x1b[B\r")
 	f.wait("Inventory · read-only")
-	f.finish(1)
+	if cancelParent {
+		if err := f.cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
+		f.exited(130, true)
+	} else {
+		f.finish(1)
+	}
 	if _, err := os.Stat(filepath.Join(f.dir, "invoked")); !os.IsNotExist(err) {
 		t.Fatal("failed startup executed an updater")
 	}
@@ -224,4 +237,22 @@ func TestInteractiveInvalidSelectorsKeepCLIExitCode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestShellDemoStartupFailureSurvivesBack(t *testing.T) {
+	f := startShell(t, "shell", "")
+	f.wait("Choose a feature")
+	for _, name := range []string{"Library", "up"} {
+		if err := os.WriteFile(filepath.Join(f.dir, name), []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.send("\x1b[B\x1b[B\r")
+	f.wait("Review your upgrades")
+	f.send("\r")
+	f.wait("create logs directory")
+	beforeBack := len(f.capture.String())
+	f.send(escapeKey)
+	f.waitSince("Choose a feature", beforeBack)
+	f.finish(1)
 }
