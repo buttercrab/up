@@ -63,23 +63,31 @@ type model struct {
 	spinner                   spinner.Model
 	bar                       progress.Model
 	logs                      viewport.Model
+	styles                    palette
 }
 
-var (
-	accent = lipgloss.NewStyle().Foreground(lipgloss.Color("#8B7CF8"))
-	muted  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C879A"))
-	good   = lipgloss.NewStyle().Foreground(lipgloss.Color("#29B998"))
-	bad    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F06A83"))
-	warn   = lipgloss.NewStyle().Foreground(lipgloss.Color("#DDAE52"))
-	title  = lipgloss.NewStyle().Bold(true)
-)
+type palette struct{ accent, muted, good, bad, warn, border lipgloss.Style }
+
+var title = lipgloss.NewStyle().Bold(true)
+
+func (m *model) setPalette(dark bool) {
+	colors := []string{"#8B7CF8", "#7C879A", "#29B998", "#F06A83", "#DDAE52", "#526078"}
+	if !dark {
+		colors = []string{"#5940B5", "#586174", "#087C62", "#B92E4B", "#8A5900", "#68748A"}
+	}
+	style := func(i int) lipgloss.Style { return lipgloss.NewStyle().Foreground(lipgloss.Color(colors[i])) }
+	m.styles = palette{style(0), style(1), style(2), style(3), style(4), style(5)}
+	m.spinner.Style = m.styles.accent
+	m.bar = progress.New(progress.WithColors(lipgloss.Color(colors[2]), lipgloss.Color(colors[0])), progress.WithoutPercentage())
+}
 
 func newModel(ctx context.Context, cancel context.CancelFunc, cfg Config) *model {
-	s := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(accent))
+	s := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	m := &model{ctx: ctx, cancel: cancel, cfg: cfg, width: 80, height: 28, follow: true,
-		spinner: s, bar: progress.New(progress.WithColors(lipgloss.Color("#29B998"), lipgloss.Color("#8B7CF8")), progress.WithoutPercentage()),
-		logs: viewport.New(),
+		spinner: s,
+		logs:    viewport.New(),
 	}
+	m.setPalette(true)
 	for _, p := range cfg.Plans {
 		m.results = append(m.results, update.Result{ID: p.ID, Status: update.Queued, ExitCode: -1})
 	}
@@ -95,7 +103,7 @@ func (m *model) Init() tea.Cmd {
 	if m.cfg.AutoStart {
 		m.start()
 	}
-	return tea.Batch(poll(), m.spinner.Tick)
+	return tea.Batch(poll(), m.spinner.Tick, tea.RequestBackgroundColor)
 }
 
 func (m *model) start() {
@@ -110,6 +118,10 @@ func (m *model) start() {
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		if msg.Color != nil {
+			m.setPalette(msg.IsDark())
+		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resize()
@@ -205,13 +217,9 @@ func (m *model) handoff(index int) tea.Cmd {
 }
 
 func (m *model) resize() {
-	w := max(10, min(m.width-6, 110))
-	m.bar.SetWidth(max(8, w-22))
-	m.logs.SetWidth(max(8, w-4))
-	m.logs.SetHeight(max(2, m.height-18-min(len(m.results), 6)))
-	if len(m.cfg.Skipped) > 0 {
-		m.logs.SetHeight(max(2, m.logs.Height()-1))
-	}
+	// View allocates the viewport from the measured chrome for the current
+	// state. A resize can reduce that space, including all the way to zero.
+	m.logs.SetWidth(max(1, min(m.width, 110)))
 	m.refreshLogs()
 }
 
@@ -224,7 +232,7 @@ func (m *model) refreshLogs() {
 	if text == "" {
 		text = "Waiting for command output…"
 	}
-	text = ansi.Wrap(text, max(8, m.logs.Width()), " ")
+	text = ansi.Wrap(strings.ReplaceAll(text, "\t", "    "), max(1, m.logs.Width()), " ")
 	offset := m.logs.YOffset()
 	m.logs.SetContent(text)
 	if m.follow {
@@ -234,8 +242,51 @@ func (m *model) refreshLogs() {
 	}
 }
 
-func (m *model) View() tea.View {
-	w := max(10, min(m.width-6, 110))
+// frameGeometry keeps outer padding inside, rather than in addition to, the
+// dimensions reported by the terminal. Unknown or zero-sized windows render
+// nothing; keyboard actions still work while waiting for a usable size.
+func (m *model) frameGeometry() (w, h, x, y int) {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	if m.width >= 24 {
+		x = 1
+	}
+	if m.width >= 60 {
+		x = 2
+	}
+	if m.height >= 24 {
+		y = 1
+	}
+	return min(m.width-2*x, 110), m.height - 2*y, x, y
+}
+
+func fitLine(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return ansi.Truncate(text, width, "…")
+}
+
+func wrapped(text string, width int) []string {
+	return strings.Split(ansi.Wrap(strings.ReplaceAll(text, "\t", "    "), max(1, width), " "), "\n")
+}
+
+// limitLines makes truncation visible instead of letting a long command push
+// the confirmation controls beyond the bottom of the terminal.
+func limitLines(lines []string, n, width int) []string {
+	if n <= 0 {
+		return nil
+	}
+	if len(lines) <= n {
+		return lines
+	}
+	result := append([]string(nil), lines[:n]...)
+	result[n-1] = fitLine(result[n-1], max(0, width-1)) + "…"
+	return result
+}
+
+func (m *model) header() string {
 	stage := "Review your upgrades"
 	if m.run != nil {
 		stage = "Upgrading your tools"
@@ -246,139 +297,328 @@ func (m *model) View() tea.View {
 	if m.stopping && !m.done {
 		stage = "Stopping commands…"
 	}
-	header := accent.Bold(true).Render("↑ up") + "  " + title.Render(stage)
+	header := m.styles.accent.Bold(true).Render("↑ up") + "  " + title.Render(stage)
 	if m.cfg.Demo {
-		header = warn.Bold(true).Render("DEMO") + "  " + header
+		header = m.styles.warn.Bold(true).Render("DEMO") + "  " + header
 	}
-	header = ansi.Truncate(header, w, "…")
-	var rows []string
-	finished, succeeded, failed, cancelled, running := 0, 0, 0, 0, 0
-	start := max(0, m.selected-5)
-	for i, r := range m.results {
-		icon, status, color := "○", string(r.Status), muted
+	return header
+}
+
+type totals struct{ finished, succeeded, failed, cancelled, running int }
+
+func (m *model) totals() totals {
+	var result totals
+	for _, r := range m.results {
 		switch r.Status {
 		case update.Running:
-			running++
-			icon, color = m.spinner.View(), accent
-			if m.cfg.Terminal != nil {
-				if session := m.cfg.Terminal.Session(r.ID); session != nil && session.NeedsInput() {
-					status, color = "needs input", warn
-				}
-			}
+			result.running++
 		case update.Succeeded:
-			icon, color = "✓", good
-			succeeded++
-			finished++
+			result.succeeded++
+			result.finished++
 		case update.Failed:
-			icon, color = "✕", bad
-			failed++
-			finished++
+			result.failed++
+			result.finished++
 		case update.Cancelled:
-			icon, color = "−", warn
-			finished++
-			cancelled++
+			result.cancelled++
+			result.finished++
 		}
-		if r.Status == update.Queued && m.run != nil {
-			if resource := m.waitingFor(i); resource != "" {
-				status = "waiting for " + resource
+	}
+	return result
+}
+
+func (m *model) selectedResult() *update.Result {
+	if m.selected < 0 || m.selected >= len(m.results) {
+		return nil
+	}
+	return &m.results[m.selected]
+}
+
+func (m *model) taskRow(index, width int) string {
+	r := m.results[index]
+	icon, status, color := "○", string(r.Status), m.styles.muted
+	switch r.Status {
+	case update.Running:
+		icon, color = m.spinner.View(), m.styles.accent
+		if m.cfg.Terminal != nil {
+			if s := m.cfg.Terminal.Session(r.ID); s != nil && s.NeedsInput() {
+				status, color = "needs input", m.styles.warn
 			}
 		}
-		if i < start || i >= start+6 {
-			continue
+	case update.Succeeded:
+		icon, color = "✓", m.styles.good
+	case update.Failed:
+		icon, color = "✕", m.styles.bad
+	case update.Cancelled:
+		icon, color = "−", m.styles.warn
+	}
+	if r.Status == update.Queued && m.run != nil {
+		if resource := m.waitingFor(index); resource != "" {
+			status = "waiting for " + resource
 		}
-		cursor := " "
-		if i == m.selected {
-			cursor = accent.Render("›")
+	}
+	cursor := " "
+	if index == m.selected {
+		cursor = m.styles.accent.Render("›")
+	}
+	id := fitLine(report.Text(r.ID), max(1, width/2))
+	if width < 48 {
+		return fitLine(fmt.Sprintf("%s %s %s %s", cursor, icon, id, color.Render(status)), width)
+	}
+	elapsed := ""
+	if !r.StartedAt.IsZero() {
+		end := r.FinishedAt
+		if end.IsZero() {
+			end = time.Now()
 		}
-		elapsed := ""
-		if !r.StartedAt.IsZero() {
-			end := r.FinishedAt
-			if end.IsZero() {
-				end = time.Now()
-			}
-			elapsed = end.Sub(r.StartedAt).Round(time.Second).String()
+		elapsed = end.Sub(r.StartedAt).Round(time.Second).String()
+	}
+	return fitLine(fmt.Sprintf("%s %s  %-14s %s  %s", cursor, icon, id, color.Render(status), m.styles.muted.Render(elapsed)), width)
+}
+
+func (m *model) taskRows(limit, width int) []string {
+	limit = min(limit, len(m.results))
+	if limit <= 0 {
+		return nil
+	}
+	start := max(0, min(m.selected-limit+1, len(m.results)-limit))
+	rows := make([]string, 0, limit)
+	for i := start; i < start+limit; i++ {
+		rows = append(rows, m.taskRow(i, width))
+	}
+	return rows
+}
+
+func (m *model) help(compact bool) string {
+	if m.done {
+		if compact {
+			return "Enter/q close"
 		}
-		row := fmt.Sprintf("%s %s  %-14s %s  %s", cursor, icon, report.Text(r.ID), color.Render(status), muted.Render(elapsed))
-		rows = append(rows, ansi.Truncate(row, w, "…"))
+		return "Enter/q close · ↑/↓ select · PgUp/PgDn logs"
 	}
-	percent := float64(finished) / float64(max(1, len(m.results)))
-	jobs := m.cfg.Engine.Jobs
-	if jobs == 0 {
-		jobs = 4
-	}
-	jobs = min(jobs, max(1, len(m.results)))
-	taskWord, workerWord := "tasks", "workers"
-	if len(m.results) == 1 {
-		taskWord = "task"
-	}
-	if jobs == 1 {
-		workerWord = "worker"
-	}
-	subtitle := muted.Render(fmt.Sprintf("%d %s · %d %s", len(m.results), taskWord, jobs, workerWord))
 	if m.run != nil {
-		subtitle += muted.Render(fmt.Sprintf(" · %d running", running))
+		if compact {
+			return "q stop · i terminal"
+		}
+		return "q stop · i terminal · ↑/↓ select · PgUp logs · End follow"
 	}
-	content := header + "\n" + subtitle + "\n\n"
-	if len(m.cfg.Skipped) > 0 {
-		content += muted.Render(ansi.Truncate("Not installed: "+strings.Join(m.cfg.Skipped, ", "), w, "…")) + "\n"
+	if compact {
+		return "Enter run · q quit"
 	}
-	content += m.bar.ViewAs(percent) + muted.Render(fmt.Sprintf("  %d/%d finished", finished, len(m.results))) + "\n\n"
-	content += strings.Join(rows, "\n") + "\n\n"
+	return "↑/↓ select · Enter start · q quit"
+}
+
+func (m *model) compactHelp(width int) string {
+	if ansi.StringWidth(m.help(true)) <= width {
+		return m.help(true)
+	}
+	if m.run != nil && !m.done && width >= len("q stop") {
+		return "q stop"
+	}
+	if width >= len("Enter/q") {
+		return "Enter/q"
+	}
+	return "q"
+}
+
+func (m *model) logBox(width int, label string, body []string) []string {
+	inner := max(1, width-4)
+	border := m.styles.border.Render
+	lines := []string{border("╭" + strings.Repeat("─", width-2) + "╮")}
+	for _, line := range append([]string{title.Render(label)}, body...) {
+		line = fitLine(line, inner)
+		lines = append(lines, border("│")+" "+line+strings.Repeat(" ", max(0, inner-ansi.StringWidth(line)))+" "+border("│"))
+	}
+	return append(lines, border("╰"+strings.Repeat("─", width-2)+"╯"))
+}
+
+// layout measures the actual header, statuses, messages and footer first. Only
+// the remaining rows belong to command details or the log viewport. If that
+// chrome cannot fit, the caller chooses a less detailed layout.
+func (m *model) layout(width, height int, compact bool) ([]string, bool) {
+	count := m.totals()
+	head := []string{fitLine(m.header(), width)}
+	if !compact {
+		jobs := m.cfg.Engine.Jobs
+		if jobs == 0 {
+			jobs = 4
+		}
+		jobs = min(jobs, max(1, len(m.results)))
+		taskWord, workerWord := "tasks", "workers"
+		if len(m.results) == 1 {
+			taskWord = "task"
+		}
+		if jobs == 1 {
+			workerWord = "worker"
+		}
+		subtitle := fmt.Sprintf("%d %s · %d %s", len(m.results), taskWord, jobs, workerWord)
+		if m.run != nil {
+			subtitle += fmt.Sprintf(" · %d running", count.running)
+		}
+		head = append(head, m.styles.muted.Render(fitLine(subtitle, width)))
+		if len(m.cfg.Skipped) > 0 {
+			head = append(head, m.styles.muted.Render(fitLine("Not installed: "+strings.Join(m.cfg.Skipped, ", "), width)))
+		}
+		suffix := fmt.Sprintf("  %d/%d finished", count.finished, len(m.results))
+		m.bar.SetWidth(max(1, width-ansi.StringWidth(suffix)))
+		head = append(head, "", fitLine(m.bar.ViewAs(float64(count.finished)/float64(max(1, len(m.results))))+m.styles.muted.Render(suffix), width), "")
+	}
+	rowLimit := 6
+	if compact {
+		rowLimit = max(1, min(6, height/3))
+	}
+	head = append(head, m.taskRows(rowLimit, width)...)
+	if !compact {
+		head = append(head, "")
+	}
+	r := m.selectedResult()
+	if r != nil && r.Err != nil {
+		head = append(head, m.styles.bad.Render(fitLine(report.Failure(*r), width)))
+		if hint := report.Hint(*r); hint != "" && !compact {
+			head = append(head, m.styles.muted.Render(fitLine(hint, width)))
+		}
+	}
+	var tail []string
+	if r != nil && r.LogPath != "" && !compact {
+		tail = append(tail, m.styles.muted.Render(fitLine("Full log: "+r.LogPath, width)))
+	}
+	if m.err != nil {
+		tail = append(tail, m.styles.bad.Render(fitLine(report.Text(m.err.Error()), width)))
+	}
+	if m.done {
+		summary := m.styles.good.Render(fmt.Sprintf("%d succeeded", count.succeeded)) + " · " + m.styles.bad.Render(fmt.Sprintf("%d failed", count.failed))
+		if count.cancelled > 0 {
+			summary += " · " + m.styles.warn.Render(fmt.Sprintf("%d cancelled", count.cancelled))
+		}
+		tail = append(tail, fitLine(summary, width))
+	}
+	if m.note != "" && !compact {
+		tail = append(tail, m.styles.warn.Render(fitLine(m.note, width)))
+	}
+	if !compact {
+		tail = append(tail, "")
+	}
+	footer := wrapped(m.help(compact), width)
+	if compact {
+		footer = []string{m.compactHelp(width)}
+	}
+	for _, line := range footer {
+		tail = append(tail, m.styles.muted.Render(line))
+	}
 	if m.run == nil && !m.done {
+		if !compact {
+			notice := "Enter starts these upgrades. Nothing has run yet."
+			if m.cfg.Demo {
+				notice = "Enter starts a simulation. No tools will run."
+			}
+			noticeLines := wrapped(notice, width)
+			for i := range noticeLines {
+				noticeLines[i] = m.styles.muted.Render(noticeLines[i])
+			}
+			tail = append(append(noticeLines, ""), tail...)
+		}
+		room := height - len(head) - len(tail) - 1 // command heading
+		if room < 1 {
+			return nil, false
+		}
 		var commands []string
-		if len(m.cfg.Plans) > 0 {
+		if m.selected >= 0 && m.selected < len(m.cfg.Plans) {
 			for _, c := range m.cfg.Plans[m.selected].Commands {
 				commands = append(commands, report.Text(c.Path+" "+strings.Join(c.Args, " ")))
 			}
 		}
-		content += title.Render("Planned command") + "\n" + ansi.Wrap(strings.Join(commands, "\n"), w, " ") + "\n\n"
-		if m.cfg.Demo {
-			content += warn.Render("Enter starts a simulation. No tools will run.")
-		} else {
-			content += muted.Render("Enter starts these upgrades. Nothing has run yet.")
-		}
-	} else if len(m.results) > 0 {
-		r := m.results[m.selected]
-		if r.Err != nil {
-			content += bad.Render(ansi.Truncate(report.Failure(r), w, "…")) + "\n"
-			if hint := report.Hint(r); hint != "" {
-				content += muted.Render(ansi.Truncate(hint, w, "…")) + "\n"
-			}
-		}
-		label := "Live log · " + report.Text(r.ID)
-		if !m.follow {
-			label += " · scrollback"
-		}
-		box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#526078")).Width(w-2).Padding(0, 1)
-		content += box.Render(title.Render(label) + "\n" + m.logs.View())
-		if r.LogPath != "" {
-			content += "\n" + muted.Render(ansi.Truncate("Full log: "+r.LogPath, w, "…"))
-		}
+		commandLines := wrapped(strings.Join(commands, "\n"), width)
+		head = append(head, title.Render(fitLine("Planned command", width)))
+		head = append(head, limitLines(commandLines, room, width)...)
+		return append(head, tail...), true
 	}
-	if m.err != nil {
-		content += "\n" + bad.Render(ansi.Truncate(report.Text(m.err.Error()), w, "…"))
+	overhead := 3 // border, log label, border
+	logWidth := width - 4
+	if compact {
+		overhead = 1
+		logWidth = width
 	}
-	if m.done {
-		content += "\n" + good.Render(fmt.Sprintf("%d succeeded", succeeded)) + " · " + bad.Render(fmt.Sprintf("%d failed", failed))
-		if cancelled > 0 {
-			content += " · " + warn.Render(fmt.Sprintf("%d cancelled", cancelled))
-		}
+	room := height - len(head) - len(tail) - overhead
+	if room < 1 || logWidth < 1 {
+		return nil, false
 	}
-	if m.note != "" {
-		content += "\n" + warn.Render(ansi.Truncate(m.note, w, "…"))
+	if m.logs.Width() != logWidth || m.logs.Height() != room {
+		m.logs.SetWidth(logWidth)
+		m.logs.SetHeight(room)
+		m.refreshLogs()
 	}
-	help := "↑/↓ select  ·  Enter start  ·  q quit"
+	label := "Live log"
+	if r != nil {
+		label += " · " + report.Text(r.ID)
+	}
+	if !m.follow {
+		label += " · scrollback"
+	}
+	body := strings.Split(m.logs.View(), "\n")
+	if compact {
+		head = append(head, title.Render(fitLine(label, width)))
+		head = append(head, body...)
+	} else {
+		head = append(head, m.logBox(width, label, body)...)
+	}
+	return append(head, tail...), true
+}
+
+func (m *model) minimal(width, height int) []string {
+	// At one row, keep the selected task and an action hint together when space
+	// permits. A one-column terminal cannot display both; q remains available.
+	action := "Enter/q"
 	if m.run != nil && !m.done {
-		help = "↑/↓ select  ·  i terminal  ·  PgUp logs  ·  End follow  ·  q stop"
+		action = "q stop"
 	}
-	if m.done {
-		help = "↑/↓ select  ·  PgUp/PgDn logs  ·  Enter/q close"
+	if width < ansi.StringWidth(action) {
+		action = "q"
 	}
-	content += "\n\n" + muted.Render(ansi.Wrap(help, w, " "))
-	if m.width < 38 || m.height < 16 {
-		content = header + "\n" + strings.Join(rows, "\n") + "\n" + ansi.Wrap("Resize for logs · Enter start/close · q stop/quit", max(8, m.width-2), " ")
+	if height == 1 {
+		if r := m.selectedResult(); r != nil && width > ansi.StringWidth(action)+1 {
+			return []string{fitLine(report.Text(r.ID), width-ansi.StringWidth(action)-1) + " " + action}
+		}
+		return []string{fitLine(action, width)}
 	}
-	view := tea.NewView(lipgloss.NewStyle().Padding(1, 2).Render(content))
+	var lines []string
+	if height >= 3 {
+		lines = append(lines, fitLine(m.header(), width))
+	}
+	if r := m.selectedResult(); r != nil {
+		// Drop decorative columns before truncating the task's actual name.
+		lines = append(lines, fitLine(report.Text(r.ID)+" "+string(r.Status), width))
+	}
+	lines = append(lines, m.styles.muted.Render(m.compactHelp(width)))
+	return lines
+}
+
+func (m *model) View() tea.View {
+	width, height, x, y := m.frameGeometry()
+	var content string
+	if width > 0 && height > 0 {
+		var lines []string
+		ok := false
+		if width >= 32 {
+			lines, ok = m.layout(width, height, false)
+		}
+		if !ok {
+			lines, ok = m.layout(width, height, true)
+		}
+		if !ok {
+			lines = m.minimal(width, height)
+		}
+		framed := make([]string, 0, len(lines)+2*y)
+		for range y {
+			framed = append(framed, "")
+		}
+		for _, line := range lines {
+			framed = append(framed, strings.Repeat(" ", x)+fitLine(line, width))
+		}
+		for range y {
+			framed = append(framed, "")
+		}
+		content = strings.Join(framed, "\n")
+	}
+	view := tea.NewView(content)
 	view.AltScreen = true
 	return view
 }

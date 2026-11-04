@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/buttercrab/up/internal/inventory"
 	"github.com/buttercrab/up/internal/process"
 	"github.com/buttercrab/up/internal/update"
 	"github.com/buttercrab/up/internal/updaters/brew"
@@ -23,17 +24,116 @@ import (
 var ErrSelection = errors.New("invalid updater selection")
 
 type Selection struct {
-	Plans   []update.Plan
-	Skipped []string
+	Plans         []update.Plan
+	Skipped       []string
+	Installations []inventory.Installation
 }
 
 type entry struct {
-	id      string
-	updater update.Updater
+	id         string
+	updater    update.Updater
+	definition inventory.Definition
 }
 
 func Discover(ctx context.Context, only, exclude string) (Selection, error) {
 	return discover(ctx, only, exclude, discoveryDeps{lookup: exec.LookPath, query: queryPrefix})
+}
+
+// Inventory describes the first matching installation of each catalogue tool
+// on the current PATH. It runs only the same bounded Homebrew/npm prefix probes
+// used for upgrade planning, and never creates or executes an upgrade run.
+func Inventory(ctx context.Context) (inventory.Report, error) {
+	return inspectInventory(ctx, discoveryDeps{lookup: exec.LookPath, query: queryPrefix})
+}
+
+func inspectInventory(ctx context.Context, deps discoveryDeps) (inventory.Report, error) {
+	selection, err := inspect(ctx, "", "", deps, false)
+	if err != nil {
+		return inventory.Report{}, err
+	}
+	report := inventory.Report{SchemaVersion: inventory.SchemaVersion, Scope: inventory.CurrentPath, Installations: []inventory.Installation{}, Missing: []inventory.MissingTool{}}
+	known := make(map[string]inventory.Installation)
+	for _, item := range selection.Installations {
+		known[item.ID] = item
+	}
+	rustupPath := known["rustup"].Executable
+	for _, definition := range inventory.Catalog() {
+		if err := ctx.Err(); err != nil {
+			return inventory.Report{}, err
+		}
+		if item, found := known[definition.ID]; found {
+			report.Installations = append(report.Installations, item)
+			continue
+		}
+		var path string
+		if definition.UpdateSupport != inventory.Supported {
+			for _, command := range definition.Commands {
+				if err := ctx.Err(); err != nil {
+					return inventory.Report{}, err
+				}
+				if found, err := deps.lookup(command); err == nil {
+					path = found
+					break
+				}
+			}
+		}
+		if path == "" {
+			report.Missing = append(report.Missing, inventory.MissingTool{ID: definition.ID, Name: definition.Name, Commands: definition.Commands})
+			continue
+		}
+		item := installation(definition, path)
+		item.Reason = appendReason(item.Reason, "Update adapter is not implemented.")
+		if definition.ID == "cargo" && sameExecutable(path, rustupPath) {
+			if item.Owner == inventory.OwnerUnknown {
+				item.Owner = inventory.OwnerRustup
+			}
+			item.Runtimes = []inventory.Runtime{runtimeInstallation("rustup", rustupPath)}
+		}
+		report.Installations = append(report.Installations, item)
+	}
+	if err := ctx.Err(); err != nil {
+		return inventory.Report{}, err
+	}
+	return report, nil
+}
+
+func installation(definition inventory.Definition, path string) inventory.Installation {
+	resolved, owner := executableIdentity(path)
+	item := inventory.Installation{ID: definition.ID, Name: definition.Name, Executable: path, ResolvedExecutable: resolved, Owner: owner, UpdateSupport: definition.UpdateSupport}
+	if resolved == "" {
+		item.Reason = "Executable target could not be resolved."
+	}
+	return item
+}
+
+func runtimeInstallation(id, path string) inventory.Runtime {
+	resolved, owner := executableIdentity(path)
+	return inventory.Runtime{ID: id, Executable: path, ResolvedExecutable: resolved, Owner: owner}
+}
+
+func executableIdentity(path string) (string, string) {
+	resolved, _ := filepath.EvalSymlinks(path)
+	owner := inventory.OwnerUnknown
+	if homebrewManaged(path) {
+		owner = inventory.OwnerHomebrew
+	}
+	return resolved, owner
+}
+
+func sameExecutable(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && aInfo.Mode().IsRegular() && bInfo.Mode().IsRegular() && os.SameFile(aInfo, bInfo)
+}
+
+func appendReason(current, next string) string {
+	if current == "" {
+		return next
+	}
+	return current + " " + next
 }
 
 type discoveryDeps struct {
@@ -42,7 +142,32 @@ type discoveryDeps struct {
 }
 
 func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Selection, error) {
-	entries := []entry{{"brew", brew.Updater{}}, {"rustup", rustup.Updater{}}, {"npm", npm.Updater{}}}
+	return inspect(ctx, only, exclude, deps, true)
+}
+
+func supportedEntries() ([]entry, error) {
+	implementations := map[string]update.Updater{"brew": brew.Updater{}, "rustup": rustup.Updater{}, "npm": npm.Updater{}}
+	var entries []entry
+	for _, definition := range inventory.Catalog() {
+		if definition.UpdateSupport != inventory.Supported {
+			continue
+		}
+		updater, found := implementations[definition.ID]
+		if !found {
+			return nil, fmt.Errorf("missing updater implementation for %s", definition.ID)
+		}
+		entries = append(entries, entry{id: definition.ID, updater: updater, definition: definition})
+	}
+	return entries, nil
+}
+
+// inspect shares the exact same metadata and safety analysis between upgrade
+// planning and the read-only inventory. Only inventory may retain blocked tools.
+func inspect(ctx context.Context, only, exclude string, deps discoveryDeps, strict bool) (Selection, error) {
+	entries, err := supportedEntries()
+	if err != nil {
+		return Selection{}, err
+	}
 	parse := func(value string) (map[string]bool, error) {
 		names := make(map[string]bool)
 		if value == "" {
@@ -57,7 +182,7 @@ func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Se
 				}
 			}
 			if !known {
-				return nil, fmt.Errorf("%w: unknown updater %q (choose brew,rustup,npm)", ErrSelection, name)
+				return nil, fmt.Errorf("%w: unknown updater %q (choose %s)", ErrSelection, name, strings.Join(inventory.SupportedIDs(), ","))
 			}
 			names[name] = true
 		}
@@ -100,6 +225,7 @@ func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Se
 			plan.Commands[i].Path = path
 		}
 		result.Plans = append(result.Plans, plan)
+		result.Installations = append(result.Installations, installation(e.definition, path))
 	}
 
 	paths := make(map[string]string)
@@ -112,7 +238,7 @@ func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Se
 		brewPath, err = deps.lookup("brew")
 		brewFound = err == nil
 	}
-	needsBrewPrefix := npmFound
+	needsBrewPrefix := npmFound || !strict
 	for _, p := range result.Plans {
 		reference, _ := homebrewReference(p.Commands[0].Path)
 		needsBrewPrefix = needsBrewPrefix || p.ID != "brew" && reference != ""
@@ -127,16 +253,36 @@ func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Se
 			return Selection{}, err
 		}
 		plan := &result.Plans[i]
+		metadata := &result.Installations[i]
 		path := plan.Commands[0].Path
+		if plan.ID == "brew" {
+			metadata.Owner = inventory.OwnerHomebrew
+			metadata.Prefix, metadata.PrefixKnown = brewPrefix, brewKnown
+			if !brewKnown {
+				if needsBrewPrefix {
+					metadata.Reason = "Homebrew prefix could not be determined."
+				} else {
+					metadata.Reason = "Homebrew prefix was not probed."
+				}
+			}
+		}
 		managed := homebrewManaged(path)
 		var nodePath string
 		if plan.ID == "npm" {
 			// npm can live outside Homebrew while still using Homebrew's node.
 			if node, err := deps.lookup("node"); err == nil {
 				nodePath = node
+				metadata.Runtimes = []inventory.Runtime{runtimeInstallation("node", node)}
 				managed = managed || homebrewManaged(node)
 			}
 			prefix, known := readPrefix(ctx, deps.query, path, "prefix", "--global")
+			metadata.Prefix, metadata.PrefixKnown = prefix, known
+			if !known {
+				metadata.Reason = "Global prefix could not be determined; Homebrew conflicts are conservatively serialized."
+			}
+			if nodePath == "" {
+				metadata.Reason = appendReason(metadata.Reason, "Node runtime was not found on PATH.")
+			}
 			// A custom npm prefix can point into Homebrew independently of its
 			// executable/runtime. Unknown scopes must never permit this overlap.
 			managed = managed || !known || brewFound && (!brewKnown || prefixesOverlap(prefix, brewPrefix))
@@ -150,11 +296,16 @@ func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Se
 				plan.Commands[0].Args = append(plan.Commands[0].Args, "--no-self-update")
 			}
 		}
+		metadata.Resources = append([]string(nil), plan.Resources...)
 		if plan.ID != "brew" {
 			_, selected := paths["brew"]
 			stable, err := approvedExecutable(path, plan.ID, selected, brewPrefix, brewKnown)
 			if err != nil {
-				return Selection{}, err
+				if strict {
+					return Selection{}, err
+				}
+				metadata.UpdateSupport, metadata.Reason = inventory.Blocked, err.Error()
+				continue
 			}
 			plan.Commands[0].Path = stable
 			replacements := map[string]string{}
@@ -164,7 +315,11 @@ func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Se
 			if nodePath != "" {
 				stableNode, err := approvedExecutable(nodePath, "node", selected, brewPrefix, brewKnown)
 				if err != nil {
-					return Selection{}, err
+					if strict {
+						return Selection{}, err
+					}
+					metadata.UpdateSupport, metadata.Reason = inventory.Blocked, err.Error()
+					continue
 				}
 				if stableNode != nodePath {
 					replacements[filepath.Dir(nodePath)] = filepath.Dir(stableNode)
@@ -172,6 +327,7 @@ func discover(ctx context.Context, only, exclude string, deps discoveryDeps) (Se
 			}
 			plan.Commands[0].Env = stableSearchPath(plan.Commands[0].Env, replacements)
 		}
+		metadata.PlannedExecutable = plan.Commands[0].Path
 	}
 	return result, nil
 }
