@@ -191,3 +191,18 @@ func TestBrewUnknownTotalKeepsTransferredBytes(t *testing.T) {
 		t.Fatal("invented unknown byte total")
 	}
 }
+
+func TestNPMLifecycleCompletionIncludingFailures(t *testing.T) {
+	for _, tc := range []struct{ record, phase string }{
+		{"{ code: 0, signal: null }", "script finished"},
+		{"{ code: 1, signal: null }", "script failed"},
+		{"{ code: null, signal: 'SIGTERM' }", "script failed"},
+	} {
+		tr := output.NewTracker("npm")
+		tr.Observe("npm info run @scope/pkg@1.0 install node_modules/@scope/pkg node install.js")
+		tr.Observe("npm info run @scope/pkg@1.0 install " + tc.record)
+		if items := tr.Items(); len(items) != 1 || items[0].Phase != tc.phase {
+			t.Fatalf("%s: %+v", tc.record, items)
+		}
+	}
+}

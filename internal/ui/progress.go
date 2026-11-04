@@ -16,7 +16,7 @@ import (
 func (m *model) packageRows(r update.Result, width, limit int) []string {
 	items := slices.Clone(r.Progress)
 	active := func(p output.Item) bool {
-		return p.Phase != "downloaded" && p.Phase != "installed" && p.Phase != "script finished"
+		return p.Phase != "downloaded" && p.Phase != "installed" && p.Phase != "script finished" && p.Phase != "script failed"
 	}
 	slices.SortStableFunc(items, func(a, b output.Item) int {
 		if active(a) == active(b) {
@@ -45,7 +45,11 @@ func (m *model) packageRows(r update.Result, width, limit int) []string {
 		} else if item.Detail != "" && (item.Phase == "downloading" || item.Phase == "downloaded") {
 			status += " · " + item.Detail
 		}
-		rows = append(rows, fitLine("  "+name+"  "+m.styles.accent.Render(report.Text(status)), width))
+		color := m.styles.accent
+		if item.Phase == "script failed" {
+			color = m.styles.bad
+		}
+		rows = append(rows, fitLine("  "+name+"  "+color.Render(report.Text(status)), width))
 	}
 	if len(items) > limit {
 		rows = append(rows, m.styles.muted.Render(fitLine(fmt.Sprintf("  +%d more · p shows all progress", len(items)-limit), width)))

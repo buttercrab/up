@@ -42,6 +42,7 @@ var (
 	rustComponent = regexp.MustCompile(`(?:downloading|installing) component ['"]?([[:alnum:]_.-]+)['"]?(?: for ['"]?([[:alnum:]_.-]+))?`)
 	rustChannel   = regexp.MustCompile(`syncing channel updates for ['"]?([[:alnum:]_.-]+)`)
 	npmRun        = regexp.MustCompile(`^npm (?:info|verbose) run (\S+)@([^@\s]+)\s`)
+	npmCompletion = regexp.MustCompile(`\{\s*code:\s*(-?[0-9]+|null),\s*signal:\s*([^}]+)\}`)
 )
 
 func bytesValue(number, unit string) float64 {
@@ -83,8 +84,11 @@ func (t *Tracker) Observe(line string) {
 	case "npm":
 		if m := npmRun.FindStringSubmatch(line); m != nil {
 			phase := "running script"
-			if strings.Contains(line, "code: 0") {
-				phase = "script finished"
+			if done := npmCompletion.FindStringSubmatch(line); done != nil {
+				phase = "script failed"
+				if done[1] == "0" && strings.TrimSpace(done[2]) == "null" {
+					phase = "script finished"
+				}
 			}
 			t.put(Item{Name: m[1], Version: m[2], Phase: phase})
 		}
