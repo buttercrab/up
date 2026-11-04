@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buttercrab/up/internal/inventory"
 	"github.com/buttercrab/up/internal/process"
 	"github.com/buttercrab/up/internal/update"
 )
@@ -47,9 +48,16 @@ func TestNativeCommandsAndIndependentResources(t *testing.T) {
 	if len(s.Plans) != 3 {
 		t.Fatalf("plans=%+v", s)
 	}
+	if len(s.Installations) != len(s.Plans) {
+		t.Fatalf("missing installation metadata: %+v", s)
+	}
 	want := [][]string{{"upgrade", "--no-ask"}, {"update"}, {"update", "--global"}}
 	resources := map[string]bool{}
 	for i, p := range s.Plans {
+		metadata := s.Installations[i]
+		if metadata.ID != p.ID || metadata.UpdateSupport != inventory.Supported || metadata.PlannedExecutable != p.Commands[0].Path || !reflect.DeepEqual(metadata.Resources, p.Resources) {
+			t.Fatalf("metadata diverged from execution plan: %+v %+v", metadata, p)
+		}
 		if !reflect.DeepEqual(p.Commands[0].Args, want[i]) {
 			t.Fatalf("%s args=%v", p.ID, p.Commands[0].Args)
 		}
@@ -59,6 +67,179 @@ func TestNativeCommandsAndIndependentResources(t *testing.T) {
 			}
 			resources[r] = true
 		}
+	}
+}
+
+func TestInventoryCancellationDuringLastLookup(t *testing.T) {
+	for _, found := range []bool{false, true} {
+		t.Run(fmt.Sprintf("found=%v", found), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			deps := discoveryTools(nil)
+			deps.lookup = func(id string) (string, error) {
+				if id == "softwareupdate" {
+					cancel()
+					if found {
+						return "/fixture/softwareupdate", nil
+					}
+				}
+				return "", exec.ErrNotFound
+			}
+			if _, err := inspectInventory(ctx, deps); !errors.Is(err, context.Canceled) {
+				t.Fatalf("lost cancellation in final lookup: %v", err)
+			}
+		})
+	}
+}
+
+func TestInventoryCatalogUsesOnlyExistingBoundedPrefixQueries(t *testing.T) {
+	root := t.TempDir()
+	paths := make(map[string]string)
+	for _, definition := range inventory.Catalog() {
+		path := filepath.Join(root, "bin", definition.Commands[0])
+		writeExecutable(t, path, "#!/bin/sh\nexit 93\n")
+		paths[definition.Commands[0]] = path
+	}
+	// Cargo is a rustup proxy when the two entrypoints share file identity.
+	if err := os.Remove(paths["cargo"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(paths["rustup"], paths["cargo"]); err != nil {
+		t.Fatal(err)
+	}
+	physicalNode := filepath.Join(root, "Cellar", "node", "1", "bin", "node")
+	writeExecutable(t, physicalNode, "#!/bin/sh\nexit 93\n")
+	paths["node"] = filepath.Join(root, "bin", "node")
+	if err := os.Symlink(physicalNode, paths["node"]); err != nil {
+		t.Fatal(err)
+	}
+	physicalNpm := filepath.Join(root, "Cellar", "node", "1", "bin", "npm")
+	writeExecutable(t, physicalNpm, "#!/bin/sh\nexit 93\n")
+	if err := os.Remove(paths["npm"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(physicalNpm, paths["npm"]); err != nil {
+		t.Fatal(err)
+	}
+	deps := discoveryTools(paths)
+	var queries []string
+	deps.query = func(ctx context.Context, path string, args ...string) (string, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("prefix query lacked a deadline")
+		}
+		queries = append(queries, path+" "+strings.Join(args, " "))
+		if path == paths["brew"] && slices.Equal(args, []string{"--prefix"}) {
+			return root, nil
+		}
+		if path == paths["npm"] && slices.Equal(args, []string{"prefix", "--global"}) {
+			return filepath.Join(root, "global"), nil
+		}
+		t.Fatalf("inventory executed an unexpected tool: %s %v", path, args)
+		return "", nil
+	}
+	report, err := inspectInventory(context.Background(), deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != 1 || report.Scope != inventory.CurrentPath || len(report.Installations) != len(inventory.Catalog()) || len(report.Missing) != 0 {
+		t.Fatalf("incomplete inventory: %+v", report)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("extra metadata probes: %v", queries)
+	}
+	byID := make(map[string]inventory.Installation)
+	for _, item := range report.Installations {
+		byID[item.ID] = item
+	}
+	if !byID["brew"].PrefixKnown || !byID["npm"].PrefixKnown || byID["npm"].Owner != inventory.OwnerHomebrew || !slices.Contains(byID["npm"].Resources, "homebrew") {
+		t.Fatalf("execution ownership metadata was lost: %+v", byID["npm"])
+	}
+	if len(byID["npm"].Runtimes) != 1 || byID["npm"].Runtimes[0].Owner != inventory.OwnerHomebrew || byID["npm"].Runtimes[0].Executable != paths["node"] {
+		t.Fatalf("missing node runtime: %+v", byID["npm"])
+	}
+	if byID["cargo"].Owner != inventory.OwnerRustup || len(byID["cargo"].Runtimes) != 1 || byID["cargo"].Runtimes[0].Executable != paths["rustup"] {
+		t.Fatalf("missing rustup proxy ownership: %+v", byID["cargo"])
+	}
+	for _, definition := range inventory.Catalog() {
+		if definition.UpdateSupport == inventory.Unsupported {
+			item := byID[definition.ID]
+			if item.UpdateSupport != inventory.Unsupported || item.PlannedExecutable != "" || item.PrefixKnown || len(item.Resources) != 0 {
+				t.Fatalf("unsupported tool gained execution capability: %+v", item)
+			}
+		}
+	}
+}
+
+func TestInventoryDoesNotExecuteUnsupportedToolsAndSeparatesMissing(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "code-insiders")
+	writeExecutable(t, path, "#!/bin/sh\nexit 93\n")
+	deps := discoveryTools(map[string]string{"code-insiders": path})
+	deps.query = func(context.Context, string, ...string) (string, error) {
+		t.Fatal("unsupported inventory tool was executed")
+		return "", nil
+	}
+	report, err := inspectInventory(context.Background(), deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Installations) != 1 || report.Installations[0].ID != "vscode" || report.Installations[0].Executable != path || report.Installations[0].UpdateSupport != inventory.Unsupported || len(report.Missing) != len(inventory.Catalog())-1 {
+		t.Fatalf("incorrect PATH catalogue: %+v", report)
+	}
+	if _, err := discover(context.Background(), "vscode", "", deps); !errors.Is(err, ErrSelection) {
+		t.Fatalf("unsupported inventory item became executable: %v", err)
+	}
+}
+
+func TestInventoryRetainsBlockedSupportedAdapterAndContinues(t *testing.T) {
+	root := t.TempDir()
+	npm := filepath.Join(root, "Cellar", "node", "1", "bin", "npm")
+	writeExecutable(t, npm, "#!/bin/sh\nexit 93\n")
+	uv := filepath.Join(root, "uv")
+	writeExecutable(t, uv, "#!/bin/sh\nexit 93\n")
+	deps := discoveryTools(map[string]string{"brew": filepath.Join(root, "bin", "brew"), "npm": npm, "node": "/independent/node", "uv": uv})
+	deps.query = func(_ context.Context, _ string, _ ...string) (string, error) { return root, nil }
+	report, err := inspectInventory(context.Background(), deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]inventory.Installation)
+	for _, item := range report.Installations {
+		byID[item.ID] = item
+	}
+	if byID["npm"].UpdateSupport != inventory.Blocked || byID["npm"].PlannedExecutable != "" || !strings.Contains(byID["npm"].Reason, "stable entry point") {
+		t.Fatalf("unsafe adapter was not blocked: %+v", byID["npm"])
+	}
+	if byID["uv"].UpdateSupport != inventory.Unsupported || byID["brew"].UpdateSupport != inventory.Supported {
+		t.Fatalf("blocked adapter aborted other detection: %+v", report)
+	}
+	if _, err := discover(context.Background(), "brew,npm", "", deps); err == nil {
+		t.Fatal("strict upgrade planning accepted blocked adapter")
+	}
+}
+
+func TestInventoryUnknownPrefixAndCancellation(t *testing.T) {
+	deps := discoveryTools(map[string]string{"brew": "/tools/brew", "npm": "/tools/npm"})
+	deps.query = func(context.Context, string, ...string) (string, error) {
+		return "", errors.New("metadata failed without returning sensitive output")
+	}
+	report, err := inspectInventory(context.Background(), deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range report.Installations {
+		if item.PrefixKnown || item.Prefix != "" || !strings.Contains(item.Reason, "could not be determined") {
+			t.Fatalf("unknown scope was presented as known: %+v", item)
+		}
+		if item.ID == "npm" && !slices.Contains(item.Resources, "homebrew") {
+			t.Fatal("unknown prefix lost conservative resource lock")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps.query = func(context.Context, string, ...string) (string, error) { cancel(); return "", context.Canceled }
+	if _, err := inspectInventory(ctx, deps); !errors.Is(err, context.Canceled) {
+		t.Fatalf("inventory swallowed cancellation: %v", err)
 	}
 }
 

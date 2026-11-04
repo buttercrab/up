@@ -41,6 +41,7 @@ go build -o /tmp/up ./cmd/up
 /tmp/up
 /tmp/up --dry-run
 /tmp/up --demo
+/tmp/up inventory
 ```
 
 In a terminal, `up` opens the review screen. Press **Enter** to start upgrades,
@@ -106,6 +107,38 @@ to avoid redundant upgrade confirmations: Homebrew uses `--no-ask`. `up` does no
 send a blanket stream of `y` answers to arbitrary installer prompts. Unrecognized
 questions and passwords still use terminal handoff.
 
+## Installation inventory
+
+Inspect the tools on your current PATH without starting an upgrade:
+
+```sh
+up inventory
+up inventory --json
+```
+
+The report separates supported adapters, detected tools with no update adapter,
+blocked installations, and missing commands. It includes executable identity,
+known ownership, effective prefixes, runtime relationships, shared resources,
+and any validated upgrade entry point. Unknown information stays explicit.
+An unsafe installation can appear as blocked while the rest of the report is
+still available; the upgrade command continues to reject unsafe plans.
+
+The catalogue covers Homebrew, rustup, npm, Cargo, uv, pipx, Bun, Go,
+VS Code/Cursor, the Mac App Store CLI, Google Cloud CLI, and macOS Software
+Update. Detection of a tool does not enable its updater: only the existing
+Homebrew, rustup, and npm adapters can execute upgrades.
+
+Scope is the first matching command on the current PATH, using file metadata
+and the existing bounded Homebrew/npm prefix queries. Installed package lists,
+GUI app bundles, alternate installations, project environments, and available
+updates need additional collectors. Unsupported tools are never executed to
+discover their versions. The command does not create an upgrade run or logs.
+
+JSON uses `schema_version: 1` and `scope: "current_path"`. Consumers should use
+stable IDs and the `update_support` values `supported`, `not_supported`, or
+`blocked`; executable paths and display names are descriptive metadata. Missing
+commands are in `missing`, not fabricated installation entries.
+
 ## Dashboard controls and sudo
 
 | Key | Action |
@@ -122,6 +155,14 @@ connect your terminal to the **same running process**. For localized or unusual
 prompts, press **i** manually. Only one command receives terminal input at a time;
 other tasks continue independently. **Ctrl-]** returns to the dashboard without
 stopping the command, and the dashboard returns automatically when it exits.
+
+The dashboard adjusts its log viewport to the remaining terminal space, keeps
+the selected task and controls visible on small screens, and uses separate
+light/dark palettes based on the terminal background. At very small sizes it
+falls back to a compact view; command details and logs return when space allows.
+Long command reviews show an ellipsis when space is insufficient; resize or use
+`--dry-run` to inspect the full plan. Terminals that do not report their background
+color retain the dark default palette.
 
 Homebrew continues to run as your user. If an installer invokes sudo, sudo reads
 its password through its own terminal; `up` forwards keystrokes directly and
@@ -156,6 +197,7 @@ internal/report/        safe log text, failure causes, recovery hints
 internal/update/        plans, scheduler, results, execution snapshots
 internal/process/       subprocess execution and process-group cancellation
 internal/updaters/      discovery, selection, Homebrew/runtime resource conflicts
+internal/inventory/     neutral installation metadata and capability catalogue
 internal/updaters/brew/ Homebrew adapter and native confirmation policy
 internal/updaters/rustup/ Rust toolchain adapter
 internal/updaters/npm/  global npm adapter

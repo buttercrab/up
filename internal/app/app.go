@@ -16,6 +16,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/buttercrab/up/internal/demo"
+	"github.com/buttercrab/up/internal/inventory"
 	"github.com/buttercrab/up/internal/process"
 	"github.com/buttercrab/up/internal/report"
 	"github.com/buttercrab/up/internal/ui"
@@ -26,18 +27,22 @@ import (
 // Run returns a shell exit code: 0 success/preview, 1 execution failure,
 // 2 invalid options, 130 cancellation. It does not exit the caller's process.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version string) int {
+	if len(args) > 0 && args[0] == "inventory" {
+		return runInventory(ctx, args[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("up", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jobs := flags.Int("jobs", 4, "maximum concurrent updaters")
 	dryRun := flags.Bool("dry-run", false, "preview commands without executing them")
 	yes := flags.Bool("yes", false, "execute the displayed plan without prompting")
 	plain := flags.Bool("plain", false, "use plain output instead of the interactive dashboard")
-	only := flags.String("only", "", "comma-separated updaters to run: brew,rustup,npm")
+	supportedIDs := strings.Join(inventory.SupportedIDs(), ",")
+	only := flags.String("only", "", "comma-separated updaters to run: "+supportedIDs)
 	exclude := flags.String("exclude", "", "comma-separated updaters to omit")
 	demoMode := flags.Bool("demo", false, "simulate three concurrent tasks without changing installed tools")
 	showVersion := flags.Bool("version", false, "print version")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: up [--dry-run | --yes] [--plain] [--jobs N] [--only NAMES | --exclude NAMES]\n\nParallel upgrades for installed Homebrew, rustup, and npm. Use --demo for a harmless simulation.")
+		fmt.Fprintf(stderr, "Usage: up [--dry-run | --yes] [--plain] [--jobs N] [--only NAMES | --exclude NAMES]\n       up inventory [--json]\n\nParallel upgrades for installed tools. Supported adapters: %s.\nUse --demo for a harmless simulation.\nUse inventory to inspect detected tools, ownership, and adapter support without upgrading.\n", supportedIDs)
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {

@@ -29,8 +29,10 @@ work. Record any separately performed package-manager smoke tests explicitly.
 
 1. Add a package under `internal/updaters` implementing
    `Plan(context.Context) (update.Plan, error)`. Planning must not change packages.
-2. Register it in `internal/updaters/registry.go`. Document detection, upgrade
-   scope, native confirmation options, and runtime dependencies.
+2. Declare its capability in `internal/inventory.Catalog()` and register its
+   implementation in `internal/updaters/registry.go`. Mark detection-only tools
+   unsupported until an adapter exists. Document detection, upgrade scope,
+   native confirmation options, and runtime dependencies.
 3. Declare exclusive resources for anything it can mutate or replace. A task
    using a Homebrew-managed runtime must not race Homebrew replacing that runtime.
 4. Add command fixtures covering successful execution, failures, missing tools,
