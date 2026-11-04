@@ -57,7 +57,8 @@ package download percentages. Colors adapt to terminal capabilities and respect
 This runs all detected adapters. Commands execute directly
 without a shell. `--dry-run` always prints commands without executing them; it
 does not refresh metadata or contact package registries. Preview describes the
-command, not a package-level change list.
+command, not a package-level change list. Discovery may run bounded, read-only
+`brew --prefix` and `npm prefix --global` queries to identify installation scope.
 
 | Adapter | Command | Scope |
 | --- | --- | --- |
@@ -75,8 +76,17 @@ Select tools explicitly or omit one:
 An explicitly requested missing tool is an error. Independent installations run
 concurrently up to `--jobs`. If npm, its Node runtime, or rustup resolves into a
 Homebrew Cellar/Caskroom, that task shares Homebrew's resource lock and waits
-while Homebrew runs. Homebrew-managed rustup also receives `--no-self-update`,
-leaving its binary to Homebrew. The dashboard labels shared-resource waits.
+while Homebrew runs. npm also shares the lock when its effective global prefix
+overlaps Homebrew, even if npm uses an independent Node installation. Unknown
+prefix metadata conservatively adds the lock, which can reduce parallelism.
+Homebrew-managed rustup also receives `--no-self-update`, leaving its binary to
+Homebrew. The dashboard labels shared-resource waits.
+
+Versioned Homebrew executable paths use an equivalent stable `opt`/`bin` alias
+when one exists. The selected Node lookup order is preserved when substituting
+a matching versioned PATH entry. If a selected Homebrew upgrade could remove
+an executable or runtime without a verified stable alias, discovery stops before
+upgrades; use a stable entry point or exclude Homebrew from that run.
 
 To see parallel activity without changing any installed tools:
 
@@ -130,6 +140,11 @@ work; during handoff it goes to the connected command. On macOS and
 Linux, commands run in separate process groups; cancellation sends TERM, then
 KILL after two seconds. Descendants that deliberately leave the process group
 are outside this cancellation boundary.
+Cancellation remains active while output drains after the parent exits, and
+remaining descendants retain their configured termination grace. Output-drain
+timeouts clean up the group without discarding the parent's nonzero exit code.
+Log-write failures remain execution failures, including in the TUI.
+An output destination that blocks indefinitely can still delay shutdown.
 
 ## Architecture
 
