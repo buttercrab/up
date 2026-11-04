@@ -149,6 +149,7 @@ func TestShellBrowseInventoryAndDemo(t *testing.T) {
 	f.wait("Review your upgrades")
 	f.noExecution()
 	f.send("\r")
+	f.wait("demo-llvm")
 	f.wait("Run complete")
 	if _, err := os.Stat(filepath.Join(f.dir, "invoked")); !os.IsNotExist(err) {
 		t.Fatal("demo invoked installed updater")

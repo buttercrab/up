@@ -203,6 +203,38 @@ func TestSnapshotsAndFullLogs(t *testing.T) {
 	}
 }
 
+func TestProgressProjectionPreservesRawLogsAndSnapshotOwnership(t *testing.T) {
+	raw := "⠋ Bottle llvm (23.1.5) Downloading 1MB/10MB\x1b[K\x1b[0G" +
+		"⠙ Bottle llvm (23.1.5) Downloading 3MB/10MB\x1b[K"
+	engine := update.Engine{LogDir: t.TempDir(), OutputWidth: 100, Executor: executorFunc(func(_ context.Context, _ process.Command, w io.Writer) error {
+		for _, b := range []byte(raw) {
+			if _, err := w.Write([]byte{b}); err != nil {
+				return err
+			}
+		}
+		return errors.New("fixture failure")
+	})}
+	run, err := engine.Start(context.Background(), []update.Plan{plan("brew")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := run.Wait()[0]
+	if result.Status != update.Failed || len(result.Progress) != 1 || result.Progress[0].Current != 3e6 {
+		t.Fatalf("bad result: %+v", result)
+	}
+	if strings.Count(result.DisplayLog, "Bottle llvm") != 1 || strings.Contains(result.DisplayLog, "1MB/") {
+		t.Fatalf("redraw: %q", result.DisplayLog)
+	}
+	data, err := os.ReadFile(result.LogPath)
+	if err != nil || string(data) != raw || result.LogTail != raw {
+		t.Fatal("projection changed raw output")
+	}
+	result.Progress[0].Name = "mutated"
+	if run.Snapshot()[0].Progress[0].Name != "llvm" {
+		t.Fatal("snapshot progress aliases live state")
+	}
+}
+
 func TestInvalidPlansNeverExecute(t *testing.T) {
 	cases := [][]update.Plan{
 		{plan("")},

@@ -191,6 +191,25 @@ Full command output is saved in a private directory under the OS user cache:
 concise failure cause when available. Logs can contain package-manager output with sensitive
 information. They remain until removed manually or by OS cache cleanup.
 
+The dashboard interprets carriage returns, cursor movement, and line erasure
+instead of appending every progress redraw to the live log. Homebrew package
+downloads and installation phases, rustup component phases and byte counters,
+and explicitly named npm lifecycle scripts appear as package progress by default.
+Press **p** to switch between the full package list and live logs; use
+**PgUp/PgDn** to scroll. A short progress summary remains above the logs on
+larger terminals. Demo exercises these displays without invoking installed tools.
+
+Progress is advisory and depends on recognized English output. Download bars
+use reported byte totals only; an unknown total shows transferred bytes and
+phase. npm's normal output often supplies no per-package progress, so it keeps
+the live log. Download completion does not imply installation success. The task
+exit status remains authoritative. Raw log files are preserved byte for byte.
+The display keeps up to 128 observed items per task and a bounded terminal
+projection of 256 rows by at most 512 columns; full logs retain older output.
+Resizing starts a fresh display projection while retaining observed progress
+and raw logs. Wrapped or unrecognized identities remain in the log rather than
+becoming guessed package names.
+
 Exit codes: `0` success or preview, `1` execution failure, `2` invalid arguments,
 `130` cancellation. In the dashboard, Ctrl-C cancels active commands and queued
 work; during handoff it goes to the connected command. On macOS and
@@ -214,6 +233,7 @@ cmd/up/                 entry point and signal handling
 internal/app/           flags, planning, plain output, exit codes
 internal/ui/            review, live dashboard, results, terminal handoff
 internal/report/        safe log text, failure causes, recovery hints
+internal/output/        bounded redraw projection and advisory progress parsers
 internal/update/        plans, scheduler, results, execution snapshots
 internal/process/       subprocess execution and process-group cancellation
 internal/updaters/      discovery, selection, Homebrew/runtime resource conflicts

@@ -11,31 +11,44 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buttercrab/up/internal/output"
 	"github.com/buttercrab/up/internal/process"
 )
 
 // Engine is immutable while Start is called. Each Start creates an independent
 // run; callers must not run separate engines against the same package database.
 type Engine struct {
-	Jobs      int              // zero defaults to four
-	Executor  process.Executor // nil uses process.Runner
-	TailBytes int              // zero defaults to 64 KiB per task
-	LogDir    string           // optional; must be unique to this run
+	Jobs        int              // zero defaults to four
+	Executor    process.Executor // nil uses process.Runner
+	TailBytes   int              // zero defaults to 64 KiB per task
+	LogDir      string           // optional; must be unique to this run
+	OutputWidth int              // terminal columns; zero is a bounded, unwrapped projection
 }
 
 // Run owns execution state. Snapshots never depend on a UI consuming events.
 type Run struct {
-	mu      sync.RWMutex
-	results []Result
-	done    chan struct{}
+	mu          sync.RWMutex
+	results     []Result
+	done        chan struct{}
+	outputWidth int
 }
 
 func (r *Run) Done() <-chan struct{} { return r.done }
 
+func (r *Run) SetOutputWidth(width int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outputWidth = width
+}
+
 func (r *Run) Snapshot() []Result {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return slices.Clone(r.results)
+	results := slices.Clone(r.results)
+	for i := range results {
+		results[i].Progress = slices.Clone(results[i].Progress)
+	}
+	return results
 }
 
 func (r *Run) Wait() []Result {
@@ -88,7 +101,7 @@ func (e Engine) Start(ctx context.Context, plans []Plan) (*Run, error) {
 			return nil, fmt.Errorf("create log directory: %w", err)
 		}
 	}
-	r := &Run{results: make([]Result, len(owned)), done: make(chan struct{})}
+	r := &Run{results: make([]Result, len(owned)), done: make(chan struct{}), outputWidth: e.OutputWidth}
 	for i, p := range owned {
 		r.results[i] = Result{ID: p.ID, Status: Queued, ExitCode: -1}
 	}
@@ -161,6 +174,8 @@ func (e Engine) execute(ctx context.Context, plan Plan, index int, r *Run) {
 	r.results[index].StartedAt = time.Now()
 	r.mu.Unlock()
 	sink := &logSink{run: r, index: index, limit: e.TailBytes}
+	sink.tracker = output.NewTracker(plan.ID)
+	sink.screen = output.NewScreen(sink.tracker.Observe)
 	var err error
 	if e.LogDir != "" {
 		name := filepath.Join(e.LogDir, fmt.Sprintf("%03d.log", index+1))
@@ -182,6 +197,7 @@ func (e Engine) execute(ctx context.Context, plan Plan, index int, r *Run) {
 			break
 		}
 	}
+	_, _ = sink.Write(nil) // flush an unterminated final observation
 	if sink.file != nil {
 		err = errors.Join(err, sink.file.Close())
 	}
@@ -208,18 +224,31 @@ func (r *Run) finish(index int, err error, cancelled bool) {
 }
 
 type logSink struct {
-	mu    sync.Mutex
-	run   *Run
-	index int
-	limit int
-	file  *os.File
+	mu      sync.Mutex
+	run     *Run
+	index   int
+	limit   int
+	file    *os.File
+	screen  *output.Screen
+	tracker *output.Tracker
 }
 
 func (s *logSink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.run.mu.RLock()
+	width := s.run.outputWidth
+	s.run.mu.RUnlock()
+	s.screen.SetWidth(width)
+	s.screen.Feed(p)
+	if p == nil {
+		s.screen.Flush()
+	}
 	s.run.mu.Lock()
 	result := &s.run.results[s.index]
+	result.DisplayLog = s.screen.Text()
+	result.DisplayReady = true
+	result.Progress = s.tracker.Items()
 	if len(p) >= s.limit {
 		result.LogTail = string(p[len(p)-s.limit:])
 	} else {

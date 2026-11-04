@@ -89,6 +89,7 @@ type model struct {
 	done, stopping, attaching  bool
 	note                       string
 	follow                     bool
+	showProgress               bool
 	spinner                    spinner.Model
 	bar                        progress.Model
 	logs                       viewport.Model
@@ -124,7 +125,7 @@ func (m *model) setPalette(dark bool) {
 
 func newModel(ctx context.Context, cfg Config) *model {
 	s := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	m := &model{ctx: ctx, cfg: cfg, width: 80, height: 28, follow: true,
+	m := &model{ctx: ctx, cfg: cfg, width: 80, height: 28, follow: true, showProgress: true,
 		spinner: s,
 		logs:    viewport.New(),
 	}
@@ -182,6 +183,7 @@ func (m *model) start() {
 			return
 		}
 	}
+	m.cfg.Engine.OutputWidth = m.width
 	m.run, m.err = m.cfg.Engine.Start(m.runCtx, m.cfg.Plans)
 	if m.err != nil {
 		m.done = true
@@ -216,6 +218,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resize()
+		if m.run != nil {
+			m.run.SetOutputWidth(msg.Width)
+		}
 		if m.cfg.Terminal != nil {
 			m.cfg.Terminal.Resize(msg.Width, msg.Height)
 		}
@@ -253,6 +258,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			m.note = "No running terminal for the selected task."
+		case "p":
+			m.showProgress = !m.showProgress
+			m.follow = false
+			m.refreshLogs()
+			m.logs.GotoTop()
 		case "pgup", "pgdown", "home":
 			m.follow = false
 			m.logs, _ = m.logs.Update(msg)
@@ -344,6 +354,13 @@ func (m *model) refreshLogs() {
 	}
 	r := m.results[m.selected]
 	text := strings.TrimSpace(report.Text(r.LogTail))
+	if r.DisplayReady || r.DisplayLog != "" {
+		text = strings.TrimSpace(r.DisplayLog)
+	}
+	if m.showProgress && len(r.Progress) > 0 {
+		lines := m.packageRows(r, max(1, m.logs.Width()), len(r.Progress))
+		text = strings.Join(lines[1:len(lines)-1], "\n")
+	}
 	if text == "" {
 		text = "Waiting for command output…"
 	}
@@ -351,7 +368,11 @@ func (m *model) refreshLogs() {
 	offset := m.logs.YOffset()
 	m.logs.SetContent(text)
 	if m.follow {
-		m.logs.GotoBottom()
+		if m.showProgress && len(r.Progress) > 0 {
+			m.logs.GotoTop()
+		} else {
+			m.logs.GotoBottom()
+		}
 	} else {
 		m.logs.SetYOffset(offset)
 	}
@@ -475,6 +496,13 @@ func (m *model) taskRow(index, width int) string {
 	if index == m.selected {
 		cursor = m.styles.accent.Render("›")
 	}
+	if r.Status == update.Running && status == string(update.Running) && len(r.Progress) > 0 {
+		word := "items"
+		if len(r.Progress) == 1 {
+			word = "item"
+		}
+		status = fmt.Sprintf("running · %d %s", len(r.Progress), word)
+	}
 	id := fitLine(report.Text(r.ID), max(1, width/2))
 	if width < 48 {
 		return fitLine(fmt.Sprintf("%s %s %s %s", cursor, icon, id, color.Render(status)), width)
@@ -509,13 +537,13 @@ func (m *model) help(compact bool) string {
 			if compact {
 				return "Enter/Esc menu · q quit"
 			}
-			return "Enter/Esc menu · q quit · ↑/↓ select · PgUp/PgDn logs"
+			return "Enter/Esc menu · q quit · ↑/↓ select · p progress/log · PgUp/PgDn"
 		}
 		if m.run != nil {
 			if compact {
 				return "Esc cancel/back · q quit · i terminal"
 			}
-			return "Esc cancel/back · q quit · i terminal · ↑/↓ select · PgUp logs · End follow"
+			return "Esc cancel/back · q quit · i terminal · ↑/↓ select · p progress/log · PgUp · End follow"
 		}
 		if compact {
 			return "Enter start · Esc back · q quit"
@@ -526,13 +554,13 @@ func (m *model) help(compact bool) string {
 		if compact {
 			return "Enter/q close"
 		}
-		return "Enter/q close · ↑/↓ select · PgUp/PgDn logs"
+		return "Enter/q close · ↑/↓ select · p progress/log · PgUp/PgDn"
 	}
 	if m.run != nil {
 		if compact {
 			return "q stop · i terminal"
 		}
-		return "q stop · i terminal · ↑/↓ select · PgUp logs · End follow"
+		return "q stop · i terminal · ↑/↓ select · p progress/log · PgUp · End follow"
 	}
 	if compact {
 		return "Enter run · q quit"
@@ -619,6 +647,9 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 		head = append(head, "")
 	}
 	r := m.selectedResult()
+	if r != nil && !compact && !m.showProgress && len(r.Progress) > 0 && height >= 24 {
+		head = append(head, m.packageRows(*r, width, 4)...)
+	}
 	if r != nil && r.Err != nil {
 		head = append(head, m.styles.bad.Render(fitLine(report.Failure(*r), width)))
 		if hint := report.Hint(*r); hint != "" && !compact {
@@ -695,10 +726,13 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 		m.refreshLogs()
 	}
 	label := "Live log"
+	if m.showProgress && r != nil && len(r.Progress) > 0 {
+		label = "Package progress"
+	}
 	if r != nil {
 		label += " · " + report.Text(r.ID)
 	}
-	if !m.follow {
+	if !m.follow && !m.showProgress {
 		label += " · scrollback"
 	}
 	body := strings.Split(m.logs.View(), "\n")
