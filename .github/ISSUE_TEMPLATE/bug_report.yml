@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible problem in up
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For vulnerabilities, follow SECURITY.md. Redact credentials, passwords,
+        tokens, and private paths before sharing command output or logs.
+  - type: input
+    id: version
+    attributes:
+      label: Version or source commit
+      description: Output of up --version, or the commit used to build it.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and terminal
+      placeholder: macOS ARM64, fish, Terminal.app
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the command, selected adapters, and whether --demo reproduces it.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or screenshot
+      description: Include only information needed to reproduce the issue.

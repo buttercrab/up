@@ -1,0 +1,53 @@
+name: Package release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Snapshot version (e.g. v0.1.0-dev.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    name: Build versioned archives
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build archives, checksums, and license notices
+        run: go run ./scripts/release --version "$RELEASE_VERSION"
+      - name: Verify and smoke test the packaged Linux binary
+        shell: bash
+        run: |
+          cd dist
+          sha256sum --check checksums.txt
+          mkdir "$RUNNER_TEMP/up-package"
+          archive="up_${RELEASE_VERSION#v}_linux_amd64.tar.gz"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/up-package"
+          test "$("$RUNNER_TEMP/up-package/up" --version)" = "$RELEASE_VERSION"
+          "$RUNNER_TEMP/up-package/up" --help
+          "$RUNNER_TEMP/up-package/up" --demo --plain --yes --jobs 3
+      - name: Upload packages for manual review and publication
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: up-${{ env.RELEASE_VERSION }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
