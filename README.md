@@ -17,7 +17,7 @@ From this checkout, with the Go toolchain specified in `go.mod`:
 ```sh
 go install ./cmd/up
 up --version
-up --demo
+up
 ```
 
 Ensure Go's binary directory is on your PATH: `GOBIN`, or the `bin` directory
@@ -40,16 +40,21 @@ go build -o /tmp/up ./cmd/up
 /tmp/up --help
 /tmp/up
 /tmp/up --dry-run
-/tmp/up --demo
-/tmp/up inventory
 ```
 
-In a terminal, `up` opens the review screen. Press **Enter** to start upgrades,
-or **q** to leave without executing anything. The dashboard shows colored task
+In a terminal, `up` opens one application with an arrow-key menu:
+
+- **Upgrades** — discover installed adapters, review commands, then press Enter to run.
+- **Inventory** — browse installations, ownership, runtime, and support details.
+- **Demo** — simulate parallel upgrades without changing installed tools.
+
+Use **↑/↓** to choose a feature and **Enter** to open it. **Esc** goes back;
+**q** quits. Browsing, loading inventory, and reviewing commands do not create
+execution logs or start upgrades. The dashboard shows colored task
 states, animated spinners, elapsed times, an overall completion bar, and live
 logs. The bar counts finished tasks (including failures); it does not invent
 package download percentages. Colors adapt to terminal capabilities and respect
-`NO_COLOR`. To skip review and start in the dashboard:
+`NO_COLOR`. For automation or a direct shortcut, skip the menu and review with:
 
 ```sh
 /tmp/up --yes --jobs 4
@@ -73,6 +78,9 @@ Select tools explicitly or omit one:
 /tmp/up --only brew,rustup
 /tmp/up --exclude npm
 ```
+
+These explicit filters open the upgrade review directly, preserving CLI
+validation and script behavior. Running plain `up` opens the feature menu.
 
 An explicitly requested missing tool is an error. Independent installations run
 concurrently up to `--jobs`. If npm, its Node runtime, or rustup resolves into a
@@ -109,14 +117,21 @@ questions and passwords still use terminal handoff.
 
 ## Installation inventory
 
-Inspect the tools on your current PATH without starting an upgrade:
+Run `up`, choose **Inventory** with the arrow keys, and press **Enter**. Select
+an installation and press Enter again for its details. Use **r** to refresh,
+**↑/↓** or **PgUp/PgDn** to scroll details, and **Esc** to go back to the list
+or main menu. No separate command is needed for interactive inventory.
+
+Script exports remain available:
 
 ```sh
-up inventory
 up inventory --json
 ```
 
-The report separates supported adapters, detected tools with no update adapter,
+The compatibility shortcut `up inventory` opens the same inventory TUI when
+input/output are terminals; redirected output produces a plain report.
+
+The inventory separates supported adapters, detected tools with no update adapter,
 blocked installations, and missing commands. It includes executable identity,
 known ownership, effective prefixes, runtime relationships, shared resources,
 and any validated upgrade entry point. Unknown information stays explicit.
@@ -143,12 +158,13 @@ commands are in `missing`, not fabricated installation entries.
 
 | Key | Action |
 | --- | --- |
-| Enter | Start the reviewed plan; close completed results |
-| ↑/↓ or k/j | Select a task and its live log |
+| Enter | Open a feature/item; start the reviewed plan; return from completed results |
+| ↑/↓ or k/j | Select a feature, installation, or task |
 | PgUp / PgDn / Home | Browse log scrollback |
 | End | Resume following live output |
 | i | Connect to the selected running command's terminal |
-| q / Esc / Ctrl-C | Leave review/results, or cancel a running plan |
+| Esc | Back; while running, cancel and return to the menu after cleanup |
+| q / Ctrl-C | Quit; while running, cancel and wait for cleanup before exit |
 
 Common password and yes/no prompts automatically suspend the dashboard and
 connect your terminal to the **same running process**. For localized or unusual
@@ -186,6 +202,10 @@ remaining descendants retain their configured termination grace. Output-drain
 timeouts clean up the group without discarding the parent's nonzero exit code.
 Log-write failures remain execution failures, including in the TUI.
 An output destination that blocks indefinitely can still delay shutdown.
+The menu keeps the latest real upgrade result for the process exit code;
+browsing inventory or running a successful demo does not erase a real failure.
+Esc-cancel returns to a usable menu; q/Ctrl-C on the dashboard cancels and exits
+with code 130. A session that only browses or runs a successful demo exits 0.
 
 ## Architecture
 

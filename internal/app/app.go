@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,7 +41,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 	demoMode := flags.Bool("demo", false, "simulate three concurrent tasks without changing installed tools")
 	showVersion := flags.Bool("version", false, "print version")
 	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: up [--dry-run | --yes] [--plain] [--jobs N] [--only NAMES | --exclude NAMES]\n       up inventory [--json]\n\nParallel upgrades for installed tools. Supported adapters: %s.\nUse --demo for a harmless simulation.\nUse inventory to inspect detected tools, ownership, and adapter support without upgrading.\n", supportedIDs)
+		fmt.Fprintf(stderr, "Usage: up [options]\n\nOpen one arrow-key application: Upgrades, Inventory, and Demo.\nUse ↑/↓ and Enter to open features; Esc goes back; q quits.\nSupported upgrade adapters: %s.\n\nAutomation: --plain --yes runs upgrades, --dry-run previews commands,\nand up inventory --json exports read-only metadata.\n", supportedIDs)
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -58,6 +57,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 	if *showVersion {
 		fmt.Fprintln(stdout, version)
 		return 0
+	}
+	interactive := !*plain && isTerminal(stdout) && term.IsTerminal(int(os.Stdin.Fd()))
+	if interactive && !*dryRun && !*yes && !*demoMode && *only == "" && *exclude == "" {
+		return runShell(ctx, stdout, stderr, shellOptions{jobs: *jobs, only: *only, exclude: *exclude}, false)
 	}
 	var selection updaters.Selection
 	var err error
@@ -85,7 +88,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 		fmt.Fprintln(stdout, "No supported updaters are installed or selected.")
 		return 0
 	}
-	interactive := !*plain && isTerminal(stdout) && term.IsTerminal(int(os.Stdin.Fd()))
 	if *dryRun || !interactive {
 		if *demoMode {
 			fmt.Fprintln(stdout, "Demo simulation: no installed tools will be changed.")
@@ -96,41 +98,27 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 			return 0
 		}
 	}
-	cache, err := os.UserCacheDir()
-	if err == nil {
-		cache = filepath.Join(cache, "up", "runs")
-		err = os.MkdirAll(cache, 0o700)
-	}
-	var logs string
-	if err == nil {
-		logs, err = os.MkdirTemp(cache, "run-")
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "up: create logs: %v\n", err)
-		return 1
-	}
-	engine := update.Engine{Jobs: *jobs, LogDir: logs}
-	if *demoMode {
-		engine.Executor = demo.Executor{}
-	}
+	cfg := newRunConfig(selection, *jobs, *demoMode, interactive)
+	cfg.AutoStart = *yes
 	var results []update.Result
 	if interactive {
-		manager := &process.TerminalManager{}
-		if *demoMode {
-			manager = nil
-		} else {
-			engine.Executor = manager
-		}
-		results, err = ui.Show(ctx, os.Stdin, stdout, ui.Config{
-			Plans: selection.Plans, Skipped: selection.Skipped, Demo: *demoMode, Engine: engine, Terminal: manager, AutoStart: *yes,
-		})
+		results, err = ui.Show(ctx, os.Stdin, stdout, cfg)
 	} else {
+		var engine update.Engine
+		engine, err = cfg.PrepareRun(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "up: %v\n", err)
+			if ctx.Err() != nil {
+				return 130
+			}
+			return 1
+		}
 		if engine.Executor == nil {
 			engine.Executor = process.Runner{}
 		}
 		engine.Executor = plainExecutor{executor: engine.Executor, output: &lockedWriter{writer: stdout}}
 		var run *update.Run
-		fmt.Fprintf(stdout, "Running; full logs: %s\n", logs)
+		fmt.Fprintf(stdout, "Running; full logs: %s\n", engine.LogDir)
 		run, err = engine.Start(ctx, selection.Plans)
 		if err == nil {
 			results = run.Wait()
@@ -138,6 +126,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "up: %v\n", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
 		return 1
 	}
 	code := 0

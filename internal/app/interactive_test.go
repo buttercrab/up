@@ -164,6 +164,13 @@ func TestInteractiveCLI(t *testing.T) {
 				t.Fatalf("missing %q in terminal output:\n%q", text, capture.String())
 			}
 			if mode != "autostart" {
+				if mode != "demo" {
+					waitText("Choose a feature")
+					if _, err := os.Stat(filepath.Join(dir, "Library")); !os.IsNotExist(err) {
+						t.Fatal("home menu created execution logs")
+					}
+					_, _ = master.Write([]byte("\r"))
+				}
 				waitText("Review your upgrades")
 				if _, err := os.Stat(filepath.Join(dir, "invoked")); !os.IsNotExist(err) {
 					t.Fatal("review executed brew")
@@ -214,7 +221,6 @@ func TestInteractiveCLI(t *testing.T) {
 				if mode == "cancel" {
 					waitText("Sleeping fixture")
 					_, _ = master.Write([]byte("q"))
-					waitText("brew: cancelled")
 				} else {
 					waitText("Run complete")
 					_, _ = master.Write([]byte("q"))
