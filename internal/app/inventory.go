@@ -6,7 +6,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"golang.org/x/term"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/buttercrab/up/internal/inventory"
@@ -19,7 +21,7 @@ func runInventory(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	flags.SetOutput(stderr)
 	asJSON := flags.Bool("json", false, "emit the versioned inventory as JSON")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: up inventory [--json]\n\nInspect tools on the current PATH, installation ownership, and update support.\nInstalled package lists and update availability are not checked.")
+		fmt.Fprintln(stderr, "Usage: up inventory [--json]\n\nInteractive shortcut to Inventory inside up. Use plain up for the main menu.\nWith --json or redirected output, export current-PATH metadata for scripts.\nInstalled package lists and update availability are not checked.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -31,6 +33,9 @@ func runInventory(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "up inventory: expected no positional arguments")
 		return 2
+	}
+	if !*asJSON && isTerminal(stdout) && term.IsTerminal(int(os.Stdin.Fd())) {
+		return runShell(ctx, stdout, stderr, shellOptions{jobs: 4}, true)
 	}
 	result, err := updaters.Inventory(ctx)
 	if err == nil {

@@ -23,7 +23,7 @@ func fixture(t *testing.T) *model {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return newModel(ctx, cancel, Config{Plans: []update.Plan{{ID: "brew", Commands: []process.Command{{Path: "fake"}}}}, Engine: update.Engine{Jobs: 4}})
+	return newModel(ctx, Config{Plans: []update.Plan{{ID: "brew", Commands: []process.Command{{Path: "fake"}}}}, Engine: update.Engine{Jobs: 4}})
 }
 
 type fixtureExecutor func(context.Context, process.Command, io.Writer) error

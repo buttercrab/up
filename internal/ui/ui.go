@@ -28,42 +28,83 @@ type Config struct {
 	AutoStart bool
 	Skipped   []string
 	Demo      bool
+	Shell     *Shell
+	// PrepareRun is called only after explicit approval (or direct AutoStart),
+	// so entering a feature or reviewing its plan need not create run logs.
+	PrepareRun func(context.Context) (update.Engine, error)
 }
 
 func Show(ctx context.Context, input io.Reader, output io.Writer, cfg Config) ([]update.Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	m := newModel(ctx, cancel, cfg)
+	m := newModel(ctx, cfg)
 	_, err := tea.NewProgram(m, tea.WithInput(input), tea.WithOutput(output), tea.WithoutSignalHandler()).Run()
 	cancel()
+	m.stopLoaders()
 	if m.run != nil {
 		m.results = m.run.Wait()
+		m.rememberRun()
+		m.rememberDemoRun()
 	}
-	if err == nil {
-		err = m.err
+	return m.outcome(err)
+}
+
+// Shell sessions report the latest approved real attempt, even after leaving
+// its screen. If none exists, retain the latest approved demo outcome instead.
+// Browsing cannot erase either outcome. Direct modes report their current run.
+func (m *model) outcome(programErr error) ([]update.Result, error) {
+	results := m.results
+	if m.shell != nil {
+		if m.realAttempted || m.lastRealErr != nil || len(m.lastRealResults) > 0 {
+			results = m.lastRealResults
+			if programErr == nil {
+				programErr = m.lastRealErr
+			}
+		} else {
+			results = m.lastDemoResults
+			if programErr == nil {
+				programErr = m.lastDemoErr
+			}
+		}
+	} else if programErr == nil {
+		programErr = m.err
 	}
-	return m.results, err
+	if m.exitErr != nil {
+		programErr = m.exitErr
+	}
+	return results, programErr
 }
 
 type pollMsg time.Time
 type handoffMsg struct{ err error }
 
 type model struct {
-	ctx                       context.Context
-	cancel                    context.CancelFunc
-	cfg                       Config
-	run                       *update.Run
-	results                   []update.Result
-	err                       error
-	selected                  int
-	width, height             int
-	done, stopping, attaching bool
-	note                      string
-	follow                    bool
-	spinner                   spinner.Model
-	bar                       progress.Model
-	logs                      viewport.Model
-	styles                    palette
+	ctx                        context.Context
+	cfg                        Config
+	run                        *update.Run
+	results                    []update.Result
+	err                        error
+	selected                   int
+	width, height              int
+	done, stopping, attaching  bool
+	note                       string
+	follow                     bool
+	spinner                    spinner.Model
+	bar                        progress.Model
+	logs                       viewport.Model
+	styles                     palette
+	shell                      *shellState
+	runCtx                     context.Context
+	cancelRun                  context.CancelFunc
+	quitAfterRun, backAfterRun bool
+	lastRealResults            []update.Result
+	lastRealErr                error
+	realAttempted              bool
+	lastDemoResults            []update.Result
+	lastDemoErr                error
+	demoResultsSaved           bool
+	resultsSaved               bool
+	exitErr                    error
 }
 
 type palette struct{ accent, muted, good, bad, warn, border lipgloss.Style }
@@ -81,13 +122,16 @@ func (m *model) setPalette(dark bool) {
 	m.bar = progress.New(progress.WithColors(lipgloss.Color(colors[2]), lipgloss.Color(colors[0])), progress.WithoutPercentage())
 }
 
-func newModel(ctx context.Context, cancel context.CancelFunc, cfg Config) *model {
+func newModel(ctx context.Context, cfg Config) *model {
 	s := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	m := &model{ctx: ctx, cancel: cancel, cfg: cfg, width: 80, height: 28, follow: true,
+	m := &model{ctx: ctx, cfg: cfg, width: 80, height: 28, follow: true,
 		spinner: s,
 		logs:    viewport.New(),
 	}
 	m.setPalette(true)
+	if cfg.Shell != nil {
+		m.shell = newShellState(cfg.Shell)
+	}
 	for _, p := range cfg.Plans {
 		m.results = append(m.results, update.Result{ID: p.ID, Status: update.Queued, ExitCode: -1})
 	}
@@ -100,6 +144,13 @@ func poll() tea.Cmd {
 }
 
 func (m *model) Init() tea.Cmd {
+	if m.shell != nil {
+		var load tea.Cmd
+		if m.shell.callbacks.StartInventory {
+			load = m.beginLoad(loadInventory, screenHome)
+		}
+		return tea.Batch(poll(), m.spinner.Tick, tea.RequestBackgroundColor, load)
+	}
 	if m.cfg.AutoStart {
 		m.start()
 	}
@@ -110,14 +161,54 @@ func (m *model) start() {
 	if m.run != nil || m.done {
 		return
 	}
-	m.run, m.err = m.cfg.Engine.Start(m.ctx, m.cfg.Plans)
+	if m.shell != nil && !m.cfg.Demo {
+		m.realAttempted = true
+		m.lastRealResults = nil
+		m.lastRealErr = nil
+	}
+	if m.shell != nil && m.cfg.Demo {
+		m.lastDemoResults = nil
+		m.lastDemoErr = nil
+		m.demoResultsSaved = false
+	}
+	m.runCtx, m.cancelRun = context.WithCancel(m.ctx)
+	if m.cfg.PrepareRun != nil {
+		m.cfg.Engine, m.err = m.cfg.PrepareRun(m.runCtx)
+		if m.err != nil {
+			m.done = true
+			m.cancelRun()
+			m.rememberStartupError()
+			m.rememberDemoStartupError()
+			return
+		}
+	}
+	m.run, m.err = m.cfg.Engine.Start(m.runCtx, m.cfg.Plans)
 	if m.err != nil {
 		m.done = true
+		m.cancelRun()
+		m.rememberStartupError()
+		m.rememberDemoStartupError()
+	}
+}
+
+func (m *model) rememberDemoStartupError() {
+	if m.shell != nil && m.cfg.Demo {
+		m.lastDemoErr = m.err
+	}
+}
+
+func (m *model) rememberDemoRun() {
+	if m.shell != nil && m.cfg.Demo && m.run != nil && !m.demoResultsSaved {
+		m.lastDemoResults = append([]update.Result(nil), m.results...)
+		m.lastDemoErr = nil
+		m.demoResultsSaved = true
 	}
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case loadedMsg:
+		m.loaded(msg)
 	case tea.BackgroundColorMsg:
 		if msg.Color != nil {
 			m.setPalette(msg.IsDark())
@@ -129,13 +220,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cfg.Terminal.Resize(msg.Width, msg.Height)
 		}
 	case tea.KeyPressMsg:
+		if m.shell != nil {
+			if handled, cmd := m.shellKey(msg); handled {
+				return m, cmd
+			}
+		}
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			if m.run == nil || m.done {
 				return m, tea.Quit
 			}
 			m.stopping = true
-			m.cancel()
+			m.quitAfterRun = true
+			if m.cancelRun != nil {
+				m.cancelRun()
+			}
 		case "enter":
 			if m.done {
 				return m, tea.Quit
@@ -175,6 +274,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case <-m.run.Done():
 				m.done = true
 				m.results = m.run.Wait()
+				m.rememberRun()
+				m.rememberDemoRun()
+				if m.cancelRun != nil {
+					m.cancelRun()
+				}
+				if m.quitAfterRun {
+					return m, tea.Quit
+				}
+				if m.backAfterRun {
+					m.home()
+					return m, poll()
+				}
 			default:
 			}
 			m.refreshLogs()
@@ -185,7 +296,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
-		if !m.attaching && m.cfg.Terminal != nil {
+		if !m.stopping && !m.attaching && m.cfg.Terminal != nil {
 			for i, r := range m.results {
 				if session := m.cfg.Terminal.Session(r.ID); session != nil && session.NeedsInput() {
 					m.selected = i
@@ -213,7 +324,11 @@ func (m *model) handoff(index int) tea.Cmd {
 	// Avoid an automatic retry loop if releasing the user's terminal fails.
 	session.DismissPrompt()
 	m.attaching = true
-	return tea.Exec(&terminalExec{ctx: m.ctx, manager: m.cfg.Terminal, session: session}, func(err error) tea.Msg { return handoffMsg{err} })
+	ctx := m.runCtx
+	if ctx == nil {
+		ctx = m.ctx
+	}
+	return tea.Exec(&terminalExec{ctx: ctx, manager: m.cfg.Terminal, session: session}, func(err error) tea.Msg { return handoffMsg{err} })
 }
 
 func (m *model) resize() {
@@ -389,6 +504,24 @@ func (m *model) taskRows(limit, width int) []string {
 }
 
 func (m *model) help(compact bool) string {
+	if m.shell != nil {
+		if m.done {
+			if compact {
+				return "Enter/Esc menu · q quit"
+			}
+			return "Enter/Esc menu · q quit · ↑/↓ select · PgUp/PgDn logs"
+		}
+		if m.run != nil {
+			if compact {
+				return "Esc cancel/back · q quit · i terminal"
+			}
+			return "Esc cancel/back · q quit · i terminal · ↑/↓ select · PgUp logs · End follow"
+		}
+		if compact {
+			return "Enter start · Esc back · q quit"
+		}
+		return "Enter start · Esc back · q quit · ↑/↓ select"
+	}
 	if m.done {
 		if compact {
 			return "Enter/q close"
@@ -408,6 +541,21 @@ func (m *model) help(compact bool) string {
 }
 
 func (m *model) compactHelp(width int) string {
+	if m.shell != nil {
+		candidates := []string{m.help(true), "Enter · Esc back · q", "Enter/Esc/q", "Enter/q", "q"}
+		if m.done {
+			candidates = []string{m.help(true), "Enter/Esc menu · q", "Enter/Esc/q", "Enter/q", "q"}
+		}
+		if m.run != nil && !m.done {
+			candidates = []string{m.help(true), "Esc cancel/back · q", "Esc/q", "q"}
+		}
+		for _, text := range candidates {
+			if ansi.StringWidth(text) <= width {
+				return text
+			}
+		}
+		return "q"
+	}
 	if ansi.StringWidth(m.help(true)) <= width {
 		return m.help(true)
 	}
@@ -570,6 +718,12 @@ func (m *model) minimal(width, height int) []string {
 	if m.run != nil && !m.done {
 		action = "q stop"
 	}
+	if m.shell != nil {
+		action = "Enter/Esc/q"
+		if m.run != nil && !m.done {
+			action = "Esc/q"
+		}
+	}
 	if width < ansi.StringWidth(action) {
 		action = "q"
 	}
@@ -597,7 +751,9 @@ func (m *model) View() tea.View {
 	if width > 0 && height > 0 {
 		var lines []string
 		ok := false
-		if width >= 32 {
+		if m.shell != nil && m.shell.screen != screenRun {
+			lines, ok = m.shellView(width, height), true
+		} else if width >= 32 {
 			lines, ok = m.layout(width, height, false)
 		}
 		if !ok {
