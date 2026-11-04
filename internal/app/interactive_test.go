@@ -35,6 +35,25 @@ func TestFakeBrew(t *testing.T) {
 	if os.Getenv("UP_FAKE_BREW") != "1" {
 		return
 	}
+	id := os.Getenv("UP_FIXTURE_TOOL")
+	if id == "" {
+		id = "brew"
+	}
+	var args []string
+	for i, arg := range os.Args {
+		if arg == "--" {
+			args = os.Args[i+1:]
+			break
+		}
+	}
+	if id == "brew" && len(args) == 1 && args[0] == "--prefix" {
+		fmt.Println(filepath.Join(os.Getenv("HOME"), "brew-prefix"))
+		os.Exit(0)
+	}
+	if id == "npm" && len(args) == 2 && args[0] == "prefix" && args[1] == "--global" {
+		fmt.Println(filepath.Join(os.Getenv("HOME"), "npm-prefix"))
+		os.Exit(0)
+	}
 	_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), "invoked"), []byte("yes"), 0o600)
 	fmt.Println("Fetching fixture packages…")
 	switch os.Getenv("UP_FAKE_MODE") {
@@ -90,13 +109,13 @@ func TestInteractiveCLI(t *testing.T) {
 			dir := t.TempDir()
 			// This executable only dispatches another test helper. It cannot run
 			// the host's package manager or perform actual privileged operations.
-			script := "#!/bin/sh\nexec " + strconv.Quote(os.Args[0]) + " -test.run=^TestFakeBrew$\n"
+			script := "#!/bin/sh\nexec " + strconv.Quote(os.Args[0]) + " -test.run=^TestFakeBrew$ -- \"$@\"\n"
 			if err := os.WriteFile(filepath.Join(dir, "brew"), []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "parallel" {
 				for _, id := range []string{"brew", "rustup", "npm"} {
-					fixture := "#!/bin/sh\nexport UP_FIXTURE_TOOL=" + id + "\nexec " + strconv.Quote(os.Args[0]) + " -test.run=^TestFakeBrew$\n"
+					fixture := "#!/bin/sh\nexport UP_FIXTURE_TOOL=" + id + "\nexec " + strconv.Quote(os.Args[0]) + " -test.run=^TestFakeBrew$ -- \"$@\"\n"
 					if err := os.WriteFile(filepath.Join(dir, id), []byte(fixture), 0o700); err != nil {
 						t.Fatal(err)
 					}

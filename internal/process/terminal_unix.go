@@ -40,7 +40,7 @@ func (m *TerminalManager) Run(ctx context.Context, c Command, output io.Writer) 
 	}
 	cmd := exec.CommandContext(ctx, c.Path, c.Args...)
 	cmd.Dir, cmd.Env = c.Dir, append(os.Environ(), c.Env...)
-	cleanup, err := configureCancellation(cmd, 2*time.Second)
+	cleanup, err := configureCancellation(ctx, cmd, 2*time.Second)
 	if err != nil {
 		return err
 	}
@@ -55,9 +55,11 @@ func (m *TerminalManager) Run(ctx context.Context, c Command, output io.Writer) 
 	}
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(min(cols, 65535)), Rows: uint16(min(rows, 65535))})
 	if err != nil {
-		cleanup(false)
 		return fmt.Errorf("start %s: %w", c.Path, err)
 	}
+	defer cleanup(false)
+	stopCancellation := watchCancellation(ctx, cmd)
+	defer stopCancellation()
 	s := &TerminalSession{file: master, done: make(chan struct{}), output: output}
 	m.mu.Lock()
 	if m.sessions == nil {
@@ -74,7 +76,7 @@ func (m *TerminalManager) Run(ctx context.Context, c Command, output io.Writer) 
 	}()
 	copyDone := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(s, master)
+		_, err := io.Copy(s, terminalReader{master})
 		copyDone <- err
 	}()
 	waitDone := make(chan error, 1)
@@ -82,7 +84,7 @@ func (m *TerminalManager) Run(ctx context.Context, c Command, output io.Writer) 
 	var copyErr error
 	select {
 	case copyErr = <-copyDone:
-		if !terminalEOF(copyErr) {
+		if copyErr != nil {
 			cleanup(true)
 		}
 		err = <-waitDone
@@ -100,7 +102,7 @@ func (m *TerminalManager) Run(ctx context.Context, c Command, output io.Writer) 
 		}
 	}
 	cleanup(ctx.Err() != nil)
-	if !terminalEOF(copyErr) {
+	if copyErr != nil {
 		err = errors.Join(err, fmt.Errorf("terminal output: %w", copyErr))
 	}
 	if ctx.Err() != nil {
@@ -109,8 +111,17 @@ func (m *TerminalManager) Run(ctx context.Context, c Command, output io.Writer) 
 	return err
 }
 
-func terminalEOF(err error) bool {
-	return err == nil || errors.Is(err, io.EOF) || errors.Is(err, syscall.EIO) || errors.Is(err, os.ErrClosed)
+// A PTY reports EIO when its last slave closes. Normalize that read-side
+// convention before copying, so identical errors from a log or terminal writer
+// remain failures and cannot be mistaken for a successfully drained terminal.
+type terminalReader struct{ io.Reader }
+
+func (r terminalReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if errors.Is(err, syscall.EIO) || errors.Is(err, os.ErrClosed) {
+		err = io.EOF
+	}
+	return n, err
 }
 
 // Attach transfers input directly to the session. Ctrl-] detaches. Passwords

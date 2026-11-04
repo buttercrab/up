@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -198,5 +201,105 @@ func TestTerminalCancellationWhileAttached(t *testing.T) {
 	case <-attached:
 	case <-time.After(time.Second):
 		t.Fatal("input read leaked after cancellation")
+	}
+}
+
+// This helper only writes fixture output, then either exits or waits to be
+// terminated. It never invokes installed package managers or privileged tools.
+func TestTerminalOutputHelper(t *testing.T) {
+	if os.Getenv("UP_TERMINAL_OUTPUT_HELPER") != "1" {
+		return
+	}
+	fmt.Fprintln(os.Stdout, "fixture output")
+	if os.Getenv("UP_TERMINAL_OUTPUT_MODE") == "wait" {
+		time.Sleep(30 * time.Second)
+	}
+	os.Exit(0)
+}
+
+func terminalOutputCommand(mode string) process.Command {
+	return process.Command{
+		Path: os.Args[0],
+		Args: []string{"-test.run=^TestTerminalOutputHelper$"},
+		Env: []string{
+			"UP_TERMINAL_OUTPUT_HELPER=1",
+			"UP_TERMINAL_OUTPUT_MODE=" + mode,
+			"GORACE=atexit_sleep_ms=0",
+		},
+		TaskID: "fixture-output",
+	}
+}
+
+type failingTerminalWriter struct{ err error }
+
+func (w failingTerminalWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestTerminalPreservesWriterErrorsAndTerminatesCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"EIO", syscall.EIO},
+		{"closed", os.ErrClosed},
+		{"EOF", io.EOF},
+	} {
+		for _, mode := range []string{"exit", "wait"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				manager := &process.TerminalManager{}
+				command := terminalOutputCommand(mode)
+				err := manager.Run(ctx, command, failingTerminalWriter{tc.err})
+				if !errors.Is(err, tc.err) || !strings.Contains(err.Error(), "terminal output") {
+					t.Fatalf("writer error lost: got %v, want terminal output error wrapping %v", err, tc.err)
+				}
+				if ctx.Err() != nil {
+					t.Fatal("writer failure did not terminate the command before its timeout")
+				}
+				if manager.Session(command.TaskID) != nil {
+					t.Fatal("failed output left a terminal session behind")
+				}
+			})
+		}
+	}
+}
+
+func TestTerminalSuccessfulExitDrainsOutput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var output bytes.Buffer
+	if err := (&process.TerminalManager{}).Run(ctx, terminalOutputCommand("exit"), &output); err != nil {
+		t.Fatalf("ordinary PTY closure treated as failure: %v", err)
+	}
+	if !strings.Contains(output.String(), "fixture output") {
+		t.Fatalf("terminal output was not drained: %q", output.String())
+	}
+}
+
+// Model cancellation immediately after Run's initial context check, before the
+// process has started and acquired a PID.
+type cancelAfterFirstCheck struct {
+	context.Context
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelAfterFirstCheck) Err() error {
+	err := c.Context.Err()
+	c.once.Do(c.cancel)
+	return err
+}
+
+func TestTerminalCancellationBeforeStartDoesNotPublishSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := &process.TerminalManager{}
+	command := terminalOutputCommand("exit")
+	err := manager.Run(&cancelAfterFirstCheck{Context: ctx, cancel: cancel}, command, io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation before Start, got %v", err)
+	}
+	if manager.Session(command.TaskID) != nil {
+		t.Fatal("failed Start published a terminal session")
 	}
 }
