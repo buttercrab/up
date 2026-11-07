@@ -54,7 +54,9 @@ execution logs or start upgrades. The dashboard uses aligned tool rows,
 finished/running/waiting counts, spinners, elapsed times, and a selected-tool
 view for package progress or live logs. Download bars use reported byte totals;
 unknown totals keep their phase and byte counter. Colors adapt to terminal capabilities and respect
-`NO_COLOR`. For automation or a direct shortcut, skip the menu and review with:
+`NO_COLOR`. A background failure keeps your selected tool and scrollback in
+place. The failure summary names affected tools; **f** opens the next failure's
+logs without retrying anything. For automation or a direct shortcut, skip the menu and review with:
 
 ```sh
 /tmp/up --yes --jobs 4

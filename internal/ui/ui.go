@@ -260,6 +260,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.follow = false
 			m.refreshLogs()
 			m.logs.GotoTop()
+		case "f":
+			m.nextFailure()
 		case "pgup", "pgdown", "home":
 			m.follow = false
 			m.logs, _ = m.logs.Update(msg)
@@ -360,6 +362,9 @@ func (m *model) refreshLogs() {
 	}
 	if text == "" {
 		text = "Waiting for command output…"
+		if m.done || r.Status == update.Failed || r.Status == update.Cancelled || r.Status == update.Succeeded {
+			text = "No output was captured for this tool."
+		}
 	}
 	text = ansi.Wrap(strings.ReplaceAll(text, "\t", "    "), max(1, m.logs.Width()), " ")
 	offset := m.logs.YOffset()
@@ -625,11 +630,17 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 		if len(m.cfg.Skipped) > 0 {
 			head = append(head, m.styles.muted.Render(fitLine("Not installed: "+strings.Join(m.cfg.Skipped, ", "), width)))
 		}
-		if width >= 72 {
-			head = append(head, m.styles.muted.Render(fitLine(fmt.Sprintf("     %-14s %-24s %s", "Tool", "State", "Activity"), width)))
-		}
 	}
 
+	if alert := m.failureSummary(width); alert != "" {
+		head = append(head, alert)
+		if !compact {
+			head = append(head, "")
+		}
+	}
+	if !compact && width >= 72 {
+		head = append(head, m.styles.muted.Render(fitLine(fmt.Sprintf("     %-14s %-24s %s", "Tool", "State", "Activity"), width)))
+	}
 	rowLimit := 6
 	if compact {
 		rowLimit = max(1, min(6, height/3))
@@ -643,7 +654,7 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 	if r != nil && r.Err != nil {
 		head = append(head, m.styles.bad.Render(fitLine(report.Failure(*r), width)))
 		if hint := report.Hint(*r); hint != "" && !compact {
-			head = append(head, m.styles.muted.Render(fitLine(hint, width)))
+			head = append(head, wrapped(m.styles.muted.Render(hint), width)...)
 		}
 	}
 	var tail []string
@@ -763,6 +774,11 @@ func (m *model) minimal(width, height int) []string {
 	if r := m.selectedResult(); r != nil {
 		// Drop decorative columns before truncating the task's actual name.
 		lines = append(lines, fitLine(report.Text(r.ID)+" "+string(r.Status), width))
+	}
+	if height >= 4 {
+		if alert := m.failureSummary(width); alert != "" {
+			lines = append(lines, fitLine(alert, width))
+		}
 	}
 	lines = append(lines, m.styles.muted.Render(m.compactHelp(width)))
 	return lines
