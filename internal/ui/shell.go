@@ -388,6 +388,13 @@ func (m *model) shellKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 
 func safe(text string) string { return strings.ReplaceAll(report.Text(text), "\t", "    ") }
 
+func shellBodyRoom(height int) int {
+	if height >= 8 {
+		return height - 4
+	}
+	return height - 2
+}
+
 // shellFrame reserves controls before content, including at tiny sizes. The
 // selected row is the first body row supplied for compact/one-line fallbacks.
 func (m *model) shellFrame(width, height int, heading string, body []string, help string) []string {
@@ -422,7 +429,14 @@ func (m *model) shellFrame(width, height int, heading string, body []string, hel
 		return []string{fitLine(item, width), m.styles.muted.Render(footer)}
 	}
 	lines := []string{title.Render(fitLine(heading, width))}
-	lines = append(lines, limitLines(body, height-2, width)...)
+	room := shellBodyRoom(height)
+	if height >= 8 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, limitLines(body, room, width)...)
+	if height >= 8 {
+		lines = append(lines, "")
+	}
 	return append(lines, m.styles.muted.Render(footer))
 }
 
@@ -438,31 +452,40 @@ func (m *model) shellView(width, height int) []string {
 			if i == s.menu {
 				cursor = m.styles.accent.Render("› ")
 			}
-			rows = append(rows, cursor+featureNames[i])
+			line := cursor + featureNames[i]
+			if width >= 64 {
+				descriptions := []string{"Review and run updates", "Installed tools and owners", "Try a simulated update run"}
+				line = cursor + padCell(featureNames[i], 14) + m.styles.muted.Render(descriptions[i])
+			}
+			rows = append(rows, line)
 		}
 		if height <= 2 {
 			rows = []string{featureNames[s.menu]}
 		}
-		if height >= 9 {
-			descriptions := []string{"Review and upgrade installed tools", "Inspect installations and ownership (read-only)", "Simulate parallel upgrades without changing tools"}
+		if height >= 9 && width < 64 {
+			descriptions := []string{"Review and run updates", "Installed tools and owners (read-only)", "Try a simulated update run"}
 			rows = append(rows, "", m.styles.muted.Render(fitLine(descriptions[s.menu], width)))
 		}
-		return m.shellFrame(width, height, m.styles.accent.Render("↑ up")+"  Choose a feature", rows, "Enter open · ↑/↓ select · q quit")
+		return m.shellFrame(width, height, "up", rows, "Enter open · ↑/↓ select · q quit")
 	case screenLoading:
 		line := m.spinner.View() + " Loading " + featureNames[int(s.loading)] + "…"
-		return m.shellFrame(width, height, "↑ up", []string{line, "Read-only discovery; this step does not run upgrades."}, "Esc back · q quit")
+		return m.shellFrame(width, height, "up", []string{line}, "Esc back · q quit")
 	case screenLoadError:
 		body := wrapped(m.styles.bad.Render(safe(s.loadErr.Error())), width)
 		return m.shellFrame(width, height, featureNames[int(s.loading)]+" unavailable", body, "r retry · Esc back · q quit")
 	case screenInventory:
-		rows := m.inventoryRows(width, max(1, height-4))
+		room := shellBodyRoom(height)
+		if height >= 6 {
+			room--
+		} // scope note
+		rows := m.inventoryRows(width, max(1, room))
 		if len(rows) == 0 {
 			rows = []string{"No installations or missing tools were reported."}
 		}
 		if height >= 6 {
-			rows = append(rows, m.styles.muted.Render(fitLine("Current PATH only · not a machine-wide census", width)))
+			rows = append(rows, m.styles.muted.Render(fitLine("Current PATH · read-only", width)))
 		}
-		return m.shellFrame(width, height, "Inventory · read-only", rows, "Enter details · ↑/↓ select · r refresh · Esc back · q quit")
+		return m.shellFrame(width, height, "up / inventory", rows, "Enter details · ↑/↓ select · r refresh · Esc back · q quit")
 	case screenDetails:
 		if len(s.items) == 0 {
 			s.screen = screenInventory
@@ -473,14 +496,14 @@ func (m *model) shellView(width, height int) []string {
 		if height <= 3 {
 			return m.shellFrame(width, height, "Inventory details", []string{safe(item.name())}, help)
 		}
-		room := height - 2
+		room := shellBodyRoom(height)
 		offset := s.details.YOffset()
 		s.details.SetWidth(width)
 		s.details.SetHeight(room)
 		s.details.SetContent(strings.Join(wrapped(m.inventoryDetails(item), width), "\n"))
 		s.details.SetYOffset(offset)
 		body := strings.Split(s.details.View(), "\n")
-		return m.shellFrame(width, height, "Inventory · "+safe(item.name()), body, help)
+		return m.shellFrame(width, height, "up / inventory / "+safe(item.name()), body, help)
 	}
 	return nil
 }
@@ -502,12 +525,17 @@ func (m *model) inventoryRows(width, limit int) []string {
 		status, color := "missing", m.styles.muted
 		if item.installed != nil {
 			status = supportLabel(item.installed.UpdateSupport)
-			color = m.styles.good
+			color = m.styles.muted
 			if item.installed.UpdateSupport != inventory.Supported {
 				color = m.styles.warn
 			}
 		}
-		rows = append(rows, fitLine(cursor+safe(item.name())+" · "+color.Render(status), width))
+		name := safe(item.name())
+		if width >= 48 {
+			rows = append(rows, fitLine(cursor+padCell(name, min(24, width/2))+"  "+color.Render(status), width))
+		} else {
+			rows = append(rows, fitLine(cursor+name+" · "+status, width))
+		}
 	}
 	return rows
 }

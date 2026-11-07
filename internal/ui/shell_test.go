@@ -21,6 +21,33 @@ func shellFixture(t *testing.T, callbacks *Shell) *model {
 	t.Cleanup(cancel)
 	return newModel(ctx, Config{Shell: callbacks})
 }
+
+func TestShellSpacingKeepsEndOfDetailsAndSelectedInventoryVisible(t *testing.T) {
+	for _, height := range []int{8, 12, 24} {
+		m := shellFixture(t, &Shell{})
+		m.width, m.height = 80, height
+		entry := testReport().Installations[0]
+		m.shell.items = []inventoryItem{{installed: &entry}}
+		m.shell.screen = screenDetails
+		m.View()
+		m.shell.details.GotoBottom()
+		text := ansi.Strip(m.View().Content)
+		if !strings.Contains(text, "available upgrades.") || !strings.Contains(text, "q quit") {
+			t.Fatalf("details end hidden at height %d: %s", height, text)
+		}
+		m.shell.screen = screenInventory
+		m.shell.items = nil
+		for range 10 {
+			m.shell.items = append(m.shell.items, inventoryItem{installed: &entry})
+		}
+		m.shell.items = append(m.shell.items, inventoryItem{missing: &inventory.MissingTool{ID: "last", Name: "Last tool"}})
+		m.shell.selected = len(m.shell.items) - 1
+		text = ansi.Strip(m.View().Content)
+		if !strings.Contains(text, "Last tool") || !strings.Contains(text, "Current PATH") {
+			t.Fatalf("inventory selection hidden at height %d: %s", height, text)
+		}
+	}
+}
 func press(m *model, code rune) tea.Cmd { _, cmd := m.Update(tea.KeyPressMsg{Code: code}); return cmd }
 func deliver(t *testing.T, m *model, cmd tea.Cmd) {
 	t.Helper()

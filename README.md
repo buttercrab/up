@@ -50,10 +50,10 @@ In a terminal, `up` opens one application with an arrow-key menu:
 
 Use **↑/↓** to choose a feature and **Enter** to open it. **Esc** goes back;
 **q** quits. Browsing, loading inventory, and reviewing commands do not create
-execution logs or start upgrades. The dashboard shows colored task
-states, animated spinners, elapsed times, an overall completion bar, and live
-logs. The bar counts finished tasks (including failures); it does not invent
-package download percentages. Colors adapt to terminal capabilities and respect
+execution logs or start upgrades. The dashboard uses aligned tool rows,
+finished/running/waiting counts, spinners, elapsed times, and a selected-tool
+view for package progress or live logs. Download bars use reported byte totals;
+unknown totals keep their phase and byte counter. Colors adapt to terminal capabilities and respect
 `NO_COLOR`. For automation or a direct shortcut, skip the menu and review with:
 
 ```sh
@@ -105,7 +105,7 @@ To see parallel activity without changing any installed tools:
 
 Demo mode uses three in-memory simulations with staggered progress. It never
 executes package managers, even if they are installed. The dashboard labels it
-**DEMO**. `--demo` cannot be combined with `--only` or `--exclude`.
+**up / demo**. `--demo` cannot be combined with `--only` or `--exclude`.
 
 Use `--plain --yes` for streaming plain output. Redirected output or non-terminal
 input also selects plain mode; execution still requires `--yes`. Plain mode does
@@ -191,6 +191,30 @@ Full command output is saved in a private directory under the OS user cache:
 concise failure cause when available. Logs can contain package-manager output with sensitive
 information. They remain until removed manually or by OS cache cleanup.
 
+The dashboard interprets carriage returns, cursor movement, and line erasure
+instead of appending every progress redraw to the live log. Homebrew package
+downloads and installation phases, rustup component phases and byte counters,
+and explicitly named npm lifecycle scripts appear as package progress by default.
+Press **p** to switch between the full package list and live logs; use
+**PgUp/PgDn** to scroll. The selected tool has one detail view at a time, with
+aligned package columns on wide terminals and stacked records on narrow ones.
+Demo exercises these displays without invoking installed tools.
+
+The terminal layout applies Taster's restrained status, progress, and spacing
+patterns. See [terminal design](docs/tui-design.md) for the rule mapping and
+the limits of applying its browser-oriented guidance to a TUI.
+
+Progress is advisory and depends on recognized English output. Download bars
+use reported byte totals only; an unknown total shows transferred bytes and
+phase. npm's normal output often supplies no per-package progress, so it keeps
+the live log. Download completion does not imply installation success. The task
+exit status remains authoritative. Raw log files are preserved byte for byte.
+The display keeps up to 128 observed items per task and a bounded terminal
+projection of 256 rows by at most 512 columns; full logs retain older output.
+Resizing starts a fresh display projection while retaining observed progress
+and raw logs. Wrapped or unrecognized identities remain in the log rather than
+becoming guessed package names.
+
 Exit codes: `0` success or preview, `1` execution failure, `2` invalid arguments,
 `130` cancellation. In the dashboard, Ctrl-C cancels active commands and queued
 work; during handoff it goes to the connected command. On macOS and
@@ -214,6 +238,7 @@ cmd/up/                 entry point and signal handling
 internal/app/           flags, planning, plain output, exit codes
 internal/ui/            review, live dashboard, results, terminal handoff
 internal/report/        safe log text, failure causes, recovery hints
+internal/output/        bounded redraw projection and advisory progress parsers
 internal/update/        plans, scheduler, results, execution snapshots
 internal/process/       subprocess execution and process-group cancellation
 internal/updaters/      discovery, selection, Homebrew/runtime resource conflicts

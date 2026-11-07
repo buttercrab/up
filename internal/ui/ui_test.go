@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/buttercrab/up/internal/output"
 	"github.com/buttercrab/up/internal/process"
 	"github.com/buttercrab/up/internal/update"
 	"github.com/charmbracelet/x/ansi"
@@ -24,6 +25,55 @@ func fixture(t *testing.T) *model {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	return newModel(ctx, Config{Plans: []update.Plan{{ID: "brew", Commands: []process.Command{{Path: "fake"}}}}, Engine: update.Engine{Jobs: 4}})
+}
+
+func TestPackageProgressAndLogToggle(t *testing.T) {
+	m := fixture(t)
+	m.showProgress = false
+	m.width, m.height = 116, 36
+	m.done = true
+	m.results = []update.Result{{ID: "brew", Status: update.Failed, LogTail: "raw old redraw", DisplayLog: "normalized log", Progress: []output.Item{
+		{Name: "llvm", Phase: "downloading", Current: 3e6, Total: 10e6, Detail: "3MB/10MB"},
+		{Name: "editor", Phase: "installing"},
+		{Name: "tool", Phase: "downloading", Current: 5e6, Detail: "5MB"},
+		{Name: "four", Phase: "downloaded"}, {Name: "five", Phase: "installed"},
+	}}}
+	m.refreshLogs()
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "brew / logs") || !strings.Contains(view, "normalized log") || strings.Contains(view, "raw old") {
+		t.Fatalf("missing structured progress: %q", view)
+	}
+	press(m, 'p')
+	view = ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "five") || !strings.Contains(view, "30%") || strings.Contains(view, "normalized log") {
+		t.Fatalf("full package view: %q", view)
+	}
+	press(m, 'p')
+	if !strings.Contains(ansi.Strip(m.View().Content), "normalized log") {
+		t.Fatal("could not return to live logs")
+	}
+	for _, size := range [][2]int{{20, 5}, {48, 20}, {80, 24}, {116, 36}} {
+		m.width, m.height = size[0], size[1]
+		view = m.View().Content
+		if len(strings.Split(view, "\n")) > m.height {
+			t.Fatal("progress overflowed terminal height")
+		}
+		for _, line := range strings.Split(view, "\n") {
+			if ansi.StringWidth(line) > m.width {
+				t.Fatal("progress overflowed terminal width")
+			}
+		}
+	}
+}
+
+func TestEmptyProjectionDoesNotResurrectErasedOutput(t *testing.T) {
+	m := fixture(t)
+	m.showProgress = false
+	m.results = []update.Result{{ID: "brew", LogTail: "stale\r\x1b[2K", DisplayReady: true}}
+	m.refreshLogs()
+	if strings.Contains(m.logs.View(), "stale") {
+		t.Fatal("erased raw output reappeared")
+	}
 }
 
 type fixtureExecutor func(context.Context, process.Command, io.Writer) error
@@ -60,7 +110,7 @@ func TestLiveSnapshotsAndCompletion(t *testing.T) {
 	}
 	m.Update(pollMsg(time.Now()))
 	text := ansi.Strip(m.View().Content)
-	for _, want := range []string{"Upgrading your tools", "running", "Downloading fixture package", "0/1 finished"} {
+	for _, want := range []string{"Updating", "running", "Downloading fixture package", "0/1 finished"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing live state %q: %s", want, text)
 		}
@@ -69,7 +119,7 @@ func TestLiveSnapshotsAndCompletion(t *testing.T) {
 	m.run.Wait()
 	m.Update(pollMsg(time.Now()))
 	text = ansi.Strip(m.View().Content)
-	if !strings.Contains(text, "Run complete") || !strings.Contains(text, "1/1 finished") || !strings.Contains(text, "1 succeeded") {
+	if !strings.Contains(text, "Finished") || !strings.Contains(text, "1/1 finished") || !strings.Contains(text, "1 succeeded") {
 		t.Fatalf("missing completion: %s", text)
 	}
 }

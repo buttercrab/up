@@ -165,13 +165,13 @@ func TestInteractiveCLI(t *testing.T) {
 			}
 			if mode != "autostart" {
 				if mode != "demo" {
-					waitText("Choose a feature")
+					waitText("Review and run updates")
 					if _, err := os.Stat(filepath.Join(dir, "Library")); !os.IsNotExist(err) {
 						t.Fatal("home menu created execution logs")
 					}
 					_, _ = master.Write([]byte("\r"))
 				}
-				waitText("Review your upgrades")
+				waitText("Review upgrades")
 				if _, err := os.Stat(filepath.Join(dir, "invoked")); !os.IsNotExist(err) {
 					t.Fatal("review executed brew")
 				}
@@ -179,7 +179,7 @@ func TestInteractiveCLI(t *testing.T) {
 			if mode == "review" {
 				_, _ = master.Write([]byte("q"))
 			} else if mode == "autostart" {
-				waitText("Run complete")
+				waitText("Finished")
 				_, _ = master.Write([]byte("q"))
 			} else {
 				_, _ = master.Write([]byte("\r"))
@@ -208,6 +208,12 @@ func TestInteractiveCLI(t *testing.T) {
 					_, _ = master.Write([]byte("j"))
 					waitText("rustup fixture live")
 					_, _ = master.Write([]byte("j"))
+					// The unboxed log can reuse the previous row's suffix using
+					// delete-character controls. A resize asks the real renderer
+					// for a full frame before asserting captured log text.
+					if err := pty.Setsize(master, &pty.Winsize{Cols: 99, Rows: 32}); err != nil {
+						t.Fatal(err)
+					}
 					waitText("npm fixture live")
 					if err := os.WriteFile(filepath.Join(dir, "release"), []byte("yes"), 0o600); err != nil {
 						t.Fatal(err)
@@ -222,7 +228,7 @@ func TestInteractiveCLI(t *testing.T) {
 					waitText("Sleeping fixture")
 					_, _ = master.Write([]byte("q"))
 				} else {
-					waitText("Run complete")
+					waitText("Finished")
 					_, _ = master.Write([]byte("q"))
 				}
 			}
@@ -264,7 +270,7 @@ func TestInteractiveCLI(t *testing.T) {
 				t.Fatal("missing actionable cause")
 			}
 			if mode == "demo" {
-				if !strings.Contains(capture.String(), "DEMO") {
+				if !strings.Contains(capture.String(), "demo") {
 					t.Fatal("simulation not labeled")
 				}
 				if _, err := os.Stat(filepath.Join(dir, "invoked")); !os.IsNotExist(err) {

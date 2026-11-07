@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -89,8 +88,8 @@ type model struct {
 	done, stopping, attaching  bool
 	note                       string
 	follow                     bool
+	showProgress               bool
 	spinner                    spinner.Model
-	bar                        progress.Model
 	logs                       viewport.Model
 	styles                     palette
 	shell                      *shellState
@@ -112,19 +111,18 @@ type palette struct{ accent, muted, good, bad, warn, border lipgloss.Style }
 var title = lipgloss.NewStyle().Bold(true)
 
 func (m *model) setPalette(dark bool) {
-	colors := []string{"#8B7CF8", "#7C879A", "#29B998", "#F06A83", "#DDAE52", "#526078"}
+	colors := []string{"#D4D4D4", "#9A9A9A", "#8FBC9F", "#E58C8C", "#D4D4D4", "#555555"}
 	if !dark {
-		colors = []string{"#5940B5", "#586174", "#087C62", "#B92E4B", "#8A5900", "#68748A"}
+		colors = []string{"#242424", "#606060", "#26714B", "#B13737", "#242424", "#B0B0B0"}
 	}
 	style := func(i int) lipgloss.Style { return lipgloss.NewStyle().Foreground(lipgloss.Color(colors[i])) }
 	m.styles = palette{style(0), style(1), style(2), style(3), style(4), style(5)}
-	m.spinner.Style = m.styles.accent
-	m.bar = progress.New(progress.WithColors(lipgloss.Color(colors[2]), lipgloss.Color(colors[0])), progress.WithoutPercentage())
+	m.spinner.Style = m.styles.muted
 }
 
 func newModel(ctx context.Context, cfg Config) *model {
 	s := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	m := &model{ctx: ctx, cfg: cfg, width: 80, height: 28, follow: true,
+	m := &model{ctx: ctx, cfg: cfg, width: 80, height: 28, follow: true, showProgress: true,
 		spinner: s,
 		logs:    viewport.New(),
 	}
@@ -182,6 +180,7 @@ func (m *model) start() {
 			return
 		}
 	}
+	m.cfg.Engine.OutputWidth = m.width
 	m.run, m.err = m.cfg.Engine.Start(m.runCtx, m.cfg.Plans)
 	if m.err != nil {
 		m.done = true
@@ -216,6 +215,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resize()
+		if m.run != nil {
+			m.run.SetOutputWidth(msg.Width)
+		}
 		if m.cfg.Terminal != nil {
 			m.cfg.Terminal.Resize(msg.Width, msg.Height)
 		}
@@ -253,6 +255,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			m.note = "No running terminal for the selected task."
+		case "p":
+			m.showProgress = !m.showProgress
+			m.follow = false
+			m.refreshLogs()
+			m.logs.GotoTop()
 		case "pgup", "pgdown", "home":
 			m.follow = false
 			m.logs, _ = m.logs.Update(msg)
@@ -344,6 +351,13 @@ func (m *model) refreshLogs() {
 	}
 	r := m.results[m.selected]
 	text := strings.TrimSpace(report.Text(r.LogTail))
+	if r.DisplayReady || r.DisplayLog != "" {
+		text = strings.TrimSpace(r.DisplayLog)
+	}
+	if m.showProgress && len(r.Progress) > 0 {
+		lines := m.packageRows(r, max(1, m.logs.Width()))
+		text = strings.Join(lines[1:len(lines)-1], "\n")
+	}
 	if text == "" {
 		text = "Waiting for command output…"
 	}
@@ -351,7 +365,11 @@ func (m *model) refreshLogs() {
 	offset := m.logs.YOffset()
 	m.logs.SetContent(text)
 	if m.follow {
-		m.logs.GotoBottom()
+		if m.showProgress && len(r.Progress) > 0 {
+			m.logs.GotoTop()
+		} else {
+			m.logs.GotoBottom()
+		}
 	} else {
 		m.logs.SetYOffset(offset)
 	}
@@ -402,21 +420,21 @@ func limitLines(lines []string, n, width int) []string {
 }
 
 func (m *model) header() string {
-	stage := "Review your upgrades"
+	stage := "Review upgrades"
 	if m.run != nil {
-		stage = "Upgrading your tools"
+		stage = "Updating"
 	}
 	if m.done {
-		stage = "Run complete"
+		stage = "Finished"
 	}
 	if m.stopping && !m.done {
 		stage = "Stopping commands…"
 	}
-	header := m.styles.accent.Bold(true).Render("↑ up") + "  " + title.Render(stage)
+	route := "upgrades"
 	if m.cfg.Demo {
-		header = m.styles.warn.Bold(true).Render("DEMO") + "  " + header
+		route = "demo"
 	}
-	return header
+	return title.Render("up") + m.styles.muted.Render(" / "+route) + "  " + stage
 }
 
 type totals struct{ finished, succeeded, failed, cancelled, running int }
@@ -477,7 +495,7 @@ func (m *model) taskRow(index, width int) string {
 	}
 	id := fitLine(report.Text(r.ID), max(1, width/2))
 	if width < 48 {
-		return fitLine(fmt.Sprintf("%s %s %s %s", cursor, icon, id, color.Render(status)), width)
+		return fitLine(fmt.Sprintf("%s %s %s %s", cursor, color.Render(icon), id, status), width)
 	}
 	elapsed := ""
 	if !r.StartedAt.IsZero() {
@@ -487,7 +505,21 @@ func (m *model) taskRow(index, width int) string {
 		}
 		elapsed = end.Sub(r.StartedAt).Round(time.Second).String()
 	}
-	return fitLine(fmt.Sprintf("%s %s  %-14s %s  %s", cursor, icon, id, color.Render(status), m.styles.muted.Render(elapsed)), width)
+	activity := ""
+	if r.Status == update.Running {
+		activity = progressActivity(r)
+	}
+	prefix := fmt.Sprintf("%s %s  %-14s %-24s ", cursor, color.Render(icon), id, status)
+	if width < 72 {
+		prefix = fmt.Sprintf("%s %s  %-14s %s", cursor, color.Render(icon), id, status)
+		activity = ""
+	}
+	available := max(0, width-ansi.StringWidth(prefix)-len(elapsed)-2)
+	line := prefix + padCell(activity, available)
+	if elapsed != "" {
+		line += "  " + m.styles.muted.Render(elapsed)
+	}
+	return fitLine(line, width)
 }
 
 func (m *model) taskRows(limit, width int) []string {
@@ -504,40 +536,47 @@ func (m *model) taskRows(limit, width int) []string {
 }
 
 func (m *model) help(compact bool) string {
+	pane := "PgUp/PgDn scroll"
+	if r := m.selectedResult(); r != nil && len(r.Progress) > 0 {
+		pane = "p logs"
+		if !m.showProgress {
+			pane = "p progress"
+		}
+	}
 	if m.shell != nil {
 		if m.done {
 			if compact {
 				return "Enter/Esc menu · q quit"
 			}
-			return "Enter/Esc menu · q quit · ↑/↓ select · PgUp/PgDn logs"
+			return "↑/↓ tool · " + pane + " · Enter/Esc menu · q quit"
 		}
 		if m.run != nil {
 			if compact {
 				return "Esc cancel/back · q quit · i terminal"
 			}
-			return "Esc cancel/back · q quit · i terminal · ↑/↓ select · PgUp logs · End follow"
+			return "↑/↓ tool · " + pane + " · i terminal · Esc cancel/back · q quit"
 		}
 		if compact {
 			return "Enter start · Esc back · q quit"
 		}
-		return "Enter start · Esc back · q quit · ↑/↓ select"
+		return "Enter run · ↑/↓ tool · Esc back · q quit"
 	}
 	if m.done {
 		if compact {
 			return "Enter/q close"
 		}
-		return "Enter/q close · ↑/↓ select · PgUp/PgDn logs"
+		return "↑/↓ tool · " + pane + " · Enter/q close"
 	}
 	if m.run != nil {
 		if compact {
 			return "q stop · i terminal"
 		}
-		return "q stop · i terminal · ↑/↓ select · PgUp logs · End follow"
+		return "↑/↓ tool · " + pane + " · i terminal · q stop"
 	}
 	if compact {
 		return "Enter run · q quit"
 	}
-	return "↑/↓ select · Enter start · q quit"
+	return "Enter run · ↑/↓ tool · q quit"
 }
 
 func (m *model) compactHelp(width int) string {
@@ -568,17 +607,6 @@ func (m *model) compactHelp(width int) string {
 	return "q"
 }
 
-func (m *model) logBox(width int, label string, body []string) []string {
-	inner := max(1, width-4)
-	border := m.styles.border.Render
-	lines := []string{border("╭" + strings.Repeat("─", width-2) + "╮")}
-	for _, line := range append([]string{title.Render(label)}, body...) {
-		line = fitLine(line, inner)
-		lines = append(lines, border("│")+" "+line+strings.Repeat(" ", max(0, inner-ansi.StringWidth(line)))+" "+border("│"))
-	}
-	return append(lines, border("╰"+strings.Repeat("─", width-2)+"╯"))
-}
-
 // layout measures the actual header, statuses, messages and footer first. Only
 // the remaining rows belong to command details or the log viewport. If that
 // chrome cannot fit, the caller chooses a less detailed layout.
@@ -586,30 +614,22 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 	count := m.totals()
 	head := []string{fitLine(m.header(), width)}
 	if !compact {
-		jobs := m.cfg.Engine.Jobs
-		if jobs == 0 {
-			jobs = 4
+		summary := fmt.Sprintf("%d/%d finished", count.finished, len(m.results))
+		if m.run != nil && !m.done {
+			summary += fmt.Sprintf(" · %d running", count.running)
+			if waiting := len(m.results) - count.finished - count.running; waiting > 0 {
+				summary += fmt.Sprintf(" · %d waiting", waiting)
+			}
 		}
-		jobs = min(jobs, max(1, len(m.results)))
-		taskWord, workerWord := "tasks", "workers"
-		if len(m.results) == 1 {
-			taskWord = "task"
-		}
-		if jobs == 1 {
-			workerWord = "worker"
-		}
-		subtitle := fmt.Sprintf("%d %s · %d %s", len(m.results), taskWord, jobs, workerWord)
-		if m.run != nil {
-			subtitle += fmt.Sprintf(" · %d running", count.running)
-		}
-		head = append(head, m.styles.muted.Render(fitLine(subtitle, width)))
+		head = append(head, m.styles.muted.Render(fitLine(summary, width)), "")
 		if len(m.cfg.Skipped) > 0 {
 			head = append(head, m.styles.muted.Render(fitLine("Not installed: "+strings.Join(m.cfg.Skipped, ", "), width)))
 		}
-		suffix := fmt.Sprintf("  %d/%d finished", count.finished, len(m.results))
-		m.bar.SetWidth(max(1, width-ansi.StringWidth(suffix)))
-		head = append(head, "", fitLine(m.bar.ViewAs(float64(count.finished)/float64(max(1, len(m.results))))+m.styles.muted.Render(suffix), width), "")
+		if width >= 72 {
+			head = append(head, m.styles.muted.Render(fitLine(fmt.Sprintf("     %-14s %-24s %s", "Tool", "State", "Activity"), width)))
+		}
 	}
+
 	rowLimit := 6
 	if compact {
 		rowLimit = max(1, min(6, height/3))
@@ -619,6 +639,7 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 		head = append(head, "")
 	}
 	r := m.selectedResult()
+
 	if r != nil && r.Err != nil {
 		head = append(head, m.styles.bad.Render(fitLine(report.Failure(*r), width)))
 		if hint := report.Hint(*r); hint != "" && !compact {
@@ -633,7 +654,10 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 		tail = append(tail, m.styles.bad.Render(fitLine(report.Text(m.err.Error()), width)))
 	}
 	if m.done {
-		summary := m.styles.good.Render(fmt.Sprintf("%d succeeded", count.succeeded)) + " · " + m.styles.bad.Render(fmt.Sprintf("%d failed", count.failed))
+		summary := fmt.Sprintf("%d succeeded", count.succeeded)
+		if count.failed > 0 {
+			summary += " · " + m.styles.bad.Render(fmt.Sprintf("%d failed", count.failed))
+		}
 		if count.cancelled > 0 {
 			summary += " · " + m.styles.warn.Render(fmt.Sprintf("%d cancelled", count.cancelled))
 		}
@@ -654,7 +678,7 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 	}
 	if m.run == nil && !m.done {
 		if !compact {
-			notice := "Enter starts these upgrades. Nothing has run yet."
+			notice := "Enter runs all listed tools. Nothing has run yet."
 			if m.cfg.Demo {
 				notice = "Enter starts a simulation. No tools will run."
 			}
@@ -679,8 +703,8 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 		head = append(head, limitLines(commandLines, room, width)...)
 		return append(head, tail...), true
 	}
-	overhead := 3 // border, log label, border
-	logWidth := width - 4
+	overhead := 1 // section heading
+	logWidth := width
 	if compact {
 		overhead = 1
 		logWidth = width
@@ -694,20 +718,19 @@ func (m *model) layout(width, height int, compact bool) ([]string, bool) {
 		m.logs.SetHeight(room)
 		m.refreshLogs()
 	}
-	label := "Live log"
-	if r != nil {
-		label += " · " + report.Text(r.ID)
+	label := "logs"
+	if m.showProgress && r != nil && len(r.Progress) > 0 {
+		label = "packages"
 	}
-	if !m.follow {
+	if r != nil {
+		label = report.Text(r.ID) + " / " + label
+	}
+	if !m.follow && !m.showProgress {
 		label += " · scrollback"
 	}
 	body := strings.Split(m.logs.View(), "\n")
-	if compact {
-		head = append(head, title.Render(fitLine(label, width)))
-		head = append(head, body...)
-	} else {
-		head = append(head, m.logBox(width, label, body)...)
-	}
+	head = append(head, title.Render(fitLine(label, width)))
+	head = append(head, body...)
 	return append(head, tail...), true
 }
 
