@@ -327,6 +327,9 @@ func inspect(ctx context.Context, only, exclude string, deps discoveryDeps, stri
 			}
 			plan.Commands[0].Env = stableSearchPath(plan.Commands[0].Env, replacements)
 		}
+		if strict && plan.ID == "npm" && metadata.PrefixKnown {
+			*plan = npm.WithSelfUpdateFirst(*plan, metadata.Prefix)
+		}
 		metadata.PlannedExecutable = plan.Commands[0].Path
 	}
 	return result, nil

@@ -191,6 +191,15 @@ Full command output is saved in a private directory under the OS user cache:
 concise failure cause when available. Logs can contain package-manager output with sensitive
 information. They remain until removed manually or by OS cache cleanup.
 
+When the global prefix already contains npm, its plan updates npm separately
+before the global batch. This keeps npm available to other packages' install
+scripts while they run. A custom prefix without npm does not get a new npm
+installation. Registry lookup and permission errors identify the npm cause
+rather than only displaying the process exit code. Tools installed from vendor
+archives may require their original installer instead of a registry update.
+The plan keeps npm's install-script approval policy; it does not grant script
+permissions or retry partially completed updates automatically.
+
 The dashboard interprets carriage returns, cursor movement, and line erasure
 instead of appending every progress redraw to the live log. Homebrew package
 downloads and installation phases, rustup component phases and byte counters,
