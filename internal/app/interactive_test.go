@@ -152,17 +152,18 @@ func TestInteractiveCLI(t *testing.T) {
 				_ = master.Close()
 				<-readDone
 			})
-			waitText := func(text string) {
+			waitTextSince := func(text string, offset int) {
 				t.Helper()
 				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
-					if strings.Contains(ansi.Strip(capture.String()), text) {
+					if strings.Contains(ansi.Strip(capture.String()[offset:]), text) {
 						return
 					}
 					time.Sleep(10 * time.Millisecond)
 				}
 				t.Fatalf("missing %q in terminal output:\n%q", text, capture.String())
 			}
+			waitText := func(text string) { waitTextSince(text, 0) }
 			if mode != "autostart" {
 				if mode != "demo" {
 					waitText("Review and run updates")
@@ -207,7 +208,11 @@ func TestInteractiveCLI(t *testing.T) {
 					waitText("brew fixture live")
 					_, _ = master.Write([]byte("j"))
 					waitText("rustup fixture live")
+					beforeSelect := len(capture.String())
 					_, _ = master.Write([]byte("j"))
+					// Wait for the selected pane's replacement prefix before the
+					// resize. Input and SIGWINCH are delivered independently.
+					waitTextSince("npm ", beforeSelect)
 					// The unboxed log can reuse the previous row's suffix using
 					// delete-character controls. A resize asks the real renderer
 					// for a full frame before asserting captured log text.

@@ -22,7 +22,7 @@ func (Updater) Plan(ctx context.Context) (update.Plan, error) {
 	return update.Plan{ID: "npm", Resources: []string{"npm-global"}, Commands: []process.Command{{Path: "npm", Args: []string{"update", "--global"}}}}, nil
 }
 
-// WithSelfUpdateFirst separates an existing global npm package from the batch.
+// WithSelfUpdateFirst updates an existing global npm package before the batch.
 // npm can unlink its own bin while reifying that batch; another package's
 // lifecycle script invoking npm then fails with command-not-found. Never add
 // a self-install to a custom prefix that does not already contain npm.
