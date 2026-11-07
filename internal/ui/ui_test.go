@@ -40,12 +40,12 @@ func TestPackageProgressAndLogToggle(t *testing.T) {
 	}}}
 	m.refreshLogs()
 	view := ansi.Strip(m.View().Content)
-	if !strings.Contains(view, "Package progress · brew") || !strings.Contains(view, "30%") || !strings.Contains(view, "normalized log") || strings.Contains(view, "raw old") {
+	if !strings.Contains(view, "brew / logs") || !strings.Contains(view, "normalized log") || strings.Contains(view, "raw old") {
 		t.Fatalf("missing structured progress: %q", view)
 	}
 	press(m, 'p')
 	view = ansi.Strip(m.View().Content)
-	if !strings.Contains(view, "five") || strings.Contains(view, "normalized log") {
+	if !strings.Contains(view, "five") || !strings.Contains(view, "30%") || strings.Contains(view, "normalized log") {
 		t.Fatalf("full package view: %q", view)
 	}
 	press(m, 'p')
@@ -110,7 +110,7 @@ func TestLiveSnapshotsAndCompletion(t *testing.T) {
 	}
 	m.Update(pollMsg(time.Now()))
 	text := ansi.Strip(m.View().Content)
-	for _, want := range []string{"Upgrading your tools", "running", "Downloading fixture package", "0/1 finished"} {
+	for _, want := range []string{"Updating", "running", "Downloading fixture package", "0/1 finished"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing live state %q: %s", want, text)
 		}
@@ -119,7 +119,7 @@ func TestLiveSnapshotsAndCompletion(t *testing.T) {
 	m.run.Wait()
 	m.Update(pollMsg(time.Now()))
 	text = ansi.Strip(m.View().Content)
-	if !strings.Contains(text, "Run complete") || !strings.Contains(text, "1/1 finished") || !strings.Contains(text, "1 succeeded") {
+	if !strings.Contains(text, "Finished") || !strings.Contains(text, "1/1 finished") || !strings.Contains(text, "1 succeeded") {
 		t.Fatalf("missing completion: %s", text)
 	}
 }

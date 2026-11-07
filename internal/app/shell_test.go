@@ -136,21 +136,21 @@ func (f *shellFixture) exited(want int, terminal bool) {
 
 func TestShellBrowseInventoryAndDemo(t *testing.T) {
 	f := startShell(t, "shell", "")
-	f.wait("Choose a feature")
+	f.wait("Review and run updates")
 	f.noExecution()
 	f.send("\x1b[B\r") // Inventory, using the arrow key requested by the user.
-	f.wait("Inventory · read-only")
+	f.wait("Current PATH · read-only")
 	f.noExecution()
 	f.send("\x1b[B\r") // uv details; unsupported detector must remain read-only.
 	f.wait("Update adapter is not implemented.")
 	f.noExecution()
 	f.send(escapeKey + escapeKey) // Details -> Inventory -> Home.
 	f.send("\x1b[B\r")            // Home remembers Inventory, so Down opens Demo.
-	f.wait("Review your upgrades")
+	f.wait("Review upgrades")
 	f.noExecution()
 	f.send("\r")
 	f.wait("demo-llvm")
-	f.wait("Run complete")
+	f.wait("Finished")
 	if _, err := os.Stat(filepath.Join(f.dir, "invoked")); !os.IsNotExist(err) {
 		t.Fatal("demo invoked installed updater")
 	}
@@ -160,25 +160,25 @@ func TestShellBrowseInventoryAndDemo(t *testing.T) {
 
 func TestShellBackAfterCancellationKeepsOtherFeaturesUsable(t *testing.T) {
 	f := startShell(t, "cancel", "")
-	f.wait("Choose a feature")
+	f.wait("Review and run updates")
 	f.send("\r")
-	f.wait("Review your upgrades")
+	f.wait("Review upgrades")
 	f.noExecution()
 	f.send("\r")
 	f.wait("Sleeping fixture")
 	beforeBack := len(f.capture.String())
 	f.send(escapeKey)
-	f.waitSince("Choose a feature", beforeBack)
+	f.waitSince("Review and run updates", beforeBack)
 	// Opening Inventory after cleanup proves the application's parent context
 	// is still live; navigating during the stopping screen is intentionally ignored.
 	f.send("\x1b[B\r")
-	f.wait("Inventory · read-only")
+	f.wait("Current PATH · read-only")
 	f.finish(130)
 }
 
 func TestInventoryShortcutUsesSameTUI(t *testing.T) {
 	f := startShell(t, "shell", "inventory")
-	f.wait("Inventory · read-only")
+	f.wait("Current PATH · read-only")
 	f.noExecution()
 	f.send("\r")
 	f.wait("Executable:")
@@ -194,7 +194,7 @@ func TestShellStartupFailureSurvivesInventoryBrowsing(t *testing.T) {
 func testShellStartupFailure(t *testing.T, cancelParent bool) {
 	t.Helper()
 	f := startShell(t, "shell", "")
-	f.wait("Choose a feature")
+	f.wait("Review and run updates")
 	// Block both native cache layouts without relying on Unix permission bits.
 	for _, name := range []string{"Library", "up"} {
 		if err := os.WriteFile(filepath.Join(f.dir, name), []byte("not a directory"), 0o600); err != nil {
@@ -202,14 +202,14 @@ func testShellStartupFailure(t *testing.T, cancelParent bool) {
 		}
 	}
 	f.send("\r")
-	f.wait("Review your upgrades")
+	f.wait("Review upgrades")
 	f.send("\r")
 	f.wait("create logs directory")
 	beforeBack := len(f.capture.String())
 	f.send(escapeKey)
-	f.waitSince("Choose a feature", beforeBack)
+	f.waitSince("Review and run updates", beforeBack)
 	f.send("\x1b[B\r")
-	f.wait("Inventory · read-only")
+	f.wait("Current PATH · read-only")
 	if cancelParent {
 		if err := f.cmd.Process.Signal(os.Interrupt); err != nil {
 			t.Fatal(err)
@@ -233,7 +233,7 @@ func TestInteractiveInvalidSelectorsKeepCLIExitCode(t *testing.T) {
 			}
 			f.exited(want, false)
 			f.noExecution()
-			if strings.Contains(f.capture.String(), "Choose a feature") {
+			if strings.Contains(f.capture.String(), "Review and run updates") {
 				t.Fatal("invalid explicit selector opened menu")
 			}
 		})
@@ -242,18 +242,18 @@ func TestInteractiveInvalidSelectorsKeepCLIExitCode(t *testing.T) {
 
 func TestShellDemoStartupFailureSurvivesBack(t *testing.T) {
 	f := startShell(t, "shell", "")
-	f.wait("Choose a feature")
+	f.wait("Review and run updates")
 	for _, name := range []string{"Library", "up"} {
 		if err := os.WriteFile(filepath.Join(f.dir, name), []byte("not a directory"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	f.send("\x1b[B\x1b[B\r")
-	f.wait("Review your upgrades")
+	f.wait("Review upgrades")
 	f.send("\r")
 	f.wait("create logs directory")
 	beforeBack := len(f.capture.String())
 	f.send(escapeKey)
-	f.waitSince("Choose a feature", beforeBack)
+	f.waitSince("Review and run updates", beforeBack)
 	f.finish(1)
 }
