@@ -28,6 +28,32 @@ func tools(paths map[string]string) func(string) (string, error) {
 	}
 }
 
+func TestDiscoveryPreparesNPMCommandsAfterEntrypointNormalization(t *testing.T) {
+	root := t.TempDir()
+	manifest := filepath.Join(root, "lib", "node_modules", "npm", "package.json")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"name":"npm"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	deps := discoveryTools(map[string]string{"npm": "/tools/npm", "node": "/tools/node"})
+	deps.query = func(context.Context, string, ...string) (string, error) { return root, nil }
+	selection, err := discover(context.Background(), "npm", "", deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := selection.Plans[0].Commands
+	if len(commands) != 2 || !slices.Equal(commands[0].Args, []string{"update", "--global", "npm"}) || !slices.Equal(commands[1].Args, []string{"update", "--global"}) {
+		t.Fatalf("wrong npm plan: %+v", commands)
+	}
+	for _, command := range commands {
+		if command.Path != "/tools/npm" {
+			t.Fatal("lost selected npm entrypoint")
+		}
+	}
+}
+
 func discoveryTools(paths map[string]string) discoveryDeps {
 	return discoveryDeps{lookup: tools(paths), query: func(_ context.Context, _ string, args ...string) (string, error) {
 		if slices.Equal(args, []string{"--prefix"}) {
