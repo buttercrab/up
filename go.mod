@@ -8,7 +8,7 @@ require (
 	charm.land/bubbles/v2 v2.2.1
 	charm.land/bubbletea/v2 v2.1.1
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/charmbracelet/x/ansi v0.11.9
+	github.com/charmbracelet/x/ansi v0.11.10
 	github.com/creack/pty v1.1.24
 	github.com/muesli/cancelreader v0.2.2
 	golang.org/x/term v0.47.0
